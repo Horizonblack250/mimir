@@ -11,6 +11,30 @@ def save_memory(memories):
     with open(MEMORY_FILE, "w") as f:
         json.dump(memories, f, indent=2)
 
+def extract_fact(user_input):
+    """Silently asks the model whether this message contains something worth remembering."""
+    extraction_prompt = [
+        {
+            "role": "system",
+            "content": (
+                "You extract long-term memorable facts about a user from a single message. "
+                "A memorable fact is something stable about them: their name, background, goals, "
+                "preferences, ongoing projects, or habits. "
+                "If the message contains such a fact, reply with ONLY a short, clean sentence stating it "
+                "(e.g. 'The user's name is Adwait.'). "
+                "If it does NOT contain anything worth remembering long-term, reply with exactly: NONE"
+            )
+        },
+        {"role": "user", "content": user_input}
+    ]
+
+    result = ollama.chat(model="llama3.2", messages=extraction_prompt)
+    fact = result["message"]["content"].strip()
+
+    if fact.upper() == "NONE" or len(fact) == 0:
+        return None
+    return fact
+
 memories = load_memory()
 memory_text = "\n".join(memories) if memories else "Nothing yet."
 
@@ -27,11 +51,6 @@ while True:
         print("Mimir: Goodbye for now.")
         break
 
-    if user_input.lower().startswith("remember that"):
-        memories.append(user_input)
-        save_memory(memories)
-        print("(saved to memory)")
-
     conversation.append({"role": "user", "content": user_input})
 
     response = ollama.chat(
@@ -43,3 +62,9 @@ while True:
     print("Mimir:", reply)
 
     conversation.append({"role": "assistant", "content": reply})
+
+    fact = extract_fact(user_input)
+    if fact:
+        memories.append(fact)
+        save_memory(memories)
+        print(f"(remembered: {fact})")
