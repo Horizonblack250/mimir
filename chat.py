@@ -14,19 +14,32 @@ def save_memory(memories):
 memories = load_memory()
 memory_text = "\n".join(memories) if memories else "Nothing yet."
 
-user_input = input("You: ")
+conversation = [
+    {"role": "system", "content": f"Here is what you currently remember about the user:\n{memory_text}"}
+]
 
-response = ollama.chat(
-    model="llama3.2",
-    messages=[
-        {"role": "system", "content": f"Here is what you currently remember about the user:\n{memory_text}"},
-        {"role": "user", "content": user_input}
-    ]
-)
+print("Mimir is ready. Type 'exit' to quit.\n")
 
-print("Mimir:", response["message"]["content"])
+while True:
+    user_input = input("You: ")
 
-if user_input.lower().startswith("remember that"):
-    memories.append(user_input)
-    save_memory(memories)
-    print("(saved to memory)")
+    if user_input.lower() == "exit":
+        print("Mimir: Goodbye for now.")
+        break
+
+    if user_input.lower().startswith("remember that"):
+        memories.append(user_input)
+        save_memory(memories)
+        print("(saved to memory)")
+
+    conversation.append({"role": "user", "content": user_input})
+
+    response = ollama.chat(
+        model="llama3.2",
+        messages=conversation
+    )
+
+    reply = response["message"]["content"]
+    print("Mimir:", reply)
+
+    conversation.append({"role": "assistant", "content": reply})
