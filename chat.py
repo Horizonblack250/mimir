@@ -11,18 +11,22 @@ def save_memory(memories):
     with open(MEMORY_FILE, "w") as f:
         json.dump(memories, f, indent=2)
 
-def extract_fact(user_input):
-    """Silently asks the model whether this message contains something worth remembering."""
+def extract_fact(user_input, existing_memories):
+    """Silently asks the model whether this message contains a NEW fact worth remembering."""
+    known = "\n".join(existing_memories) if existing_memories else "Nothing yet."
+
     extraction_prompt = [
         {
             "role": "system",
             "content": (
-                "You extract long-term memorable facts about a user from a single message. "
-                "A memorable fact is something stable about them: their name, background, goals, "
-                "preferences, ongoing projects, or habits. "
-                "If the message contains such a fact, reply with ONLY a short, clean sentence stating it "
-                "(e.g. 'The user's name is Adwait.'). "
-                "If it does NOT contain anything worth remembering long-term, reply with exactly: NONE"
+                "You extract long-term memorable facts about a user from a single message.\n"
+                "A memorable fact is something stable: their name, background, goals, preferences, "
+                "ongoing projects, or habits.\n\n"
+                f"Here is what is ALREADY known about the user:\n{known}\n\n"
+                "If the new message contains a fact that is NOT already covered above, reply with ONLY "
+                "a short, clean sentence stating it (e.g. 'The user's name is Adwait.').\n"
+                "If the message contains nothing new worth remembering, or repeats something already known, "
+                "reply with exactly: NONE"
             )
         },
         {"role": "user", "content": user_input}
@@ -63,7 +67,7 @@ while True:
 
     conversation.append({"role": "assistant", "content": reply})
 
-    fact = extract_fact(user_input)
+    fact = extract_fact(user_input, memories)
     if fact:
         memories.append(fact)
         save_memory(memories)
