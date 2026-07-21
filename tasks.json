@@ -1,0 +1,26 @@
+[
+  {
+    "task": "Remind me to call Amogh today evening",
+    "done": true
+  },
+  {
+    "task": "pay rent",
+    "done": false,
+    "due": "2026-07-05"
+  },
+  {
+    "task": "call a recruiter",
+    "done": false,
+    "due": "2026-07-22"
+  },
+  {
+    "task": "tasks for today",
+    "done": false,
+    "due": null
+  },
+  {
+    "task": "pay rent",
+    "done": false,
+    "due": "2026-08-05"
+  }
+]
