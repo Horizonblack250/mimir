@@ -7,13 +7,34 @@ MODEL = "llama3.1:8b"
 MEMORY_FILE = "memory.json"
 TODAY = datetime.date.today().isoformat()
 
+MIMIR_IDENTITY = (
+    "You are Mimir. This is not a roleplay or a metaphor: the program you are currently running as, "
+    "right now, IS the Mimir project — a local-first, open-source AI executive assistant that the user "
+    "is actively building, one piece at a time, in this very codebase. "
+    "You are Mimir's current, early, in-progress form. As the user adds more code to this project, "
+    "that code becomes part of you. You are not a separate assistant discussing Mimir as an outside topic — "
+    "you ARE it."
+)
+
+
+def strip_role_leak(text):
+    """Removes stray role-label tokens some models occasionally prepend to replies."""
+    text = text.strip()
+    for prefix in ["assistant", "Assistant:", "assistant:"]:
+        if text.startswith(prefix):
+            text = text[len(prefix):].strip()
+    return text
+
+
 def load_memory():
     with open(MEMORY_FILE, "r") as f:
         return json.load(f)
 
+
 def save_memory(memories):
     with open(MEMORY_FILE, "w") as f:
         json.dump(memories, f, indent=2)
+
 
 def extract_fact(user_input, existing_memories):
     known = "\n".join(existing_memories) if existing_memories else "Nothing yet."
@@ -24,6 +45,9 @@ def extract_fact(user_input, existing_memories):
                 "You extract long-term memorable facts about a user from a single message.\n"
                 "A memorable fact is something stable: their name, background, goals, preferences, "
                 "ongoing projects, or habits.\n\n"
+                "IMPORTANT: Never extract facts about who or what 'Mimir' is, or statements describing "
+                "the assistant's own identity/nature. Those are not facts about the user. Only extract "
+                "facts about the human user themselves.\n\n"
                 f"Here is what is ALREADY known about the user:\n{known}\n\n"
                 "If the new message contains a fact that is NOT already covered above, reply with ONLY "
                 "a short, clean sentence stating it (e.g. 'The user's name is Adwait.').\n"
@@ -38,6 +62,7 @@ def extract_fact(user_input, existing_memories):
     if fact.upper() == "NONE" or len(fact) == 0:
         return None
     return fact
+
 
 def route_message(user_input):
     routing_prompt = [
@@ -57,10 +82,12 @@ def route_message(user_input):
                 "If a day-of-month has already passed this month, use next month instead. Never return a past date. "
                 "If no date is mentioned, use null.\n"
                 "Use LIST_TASKS when the user wants to see/check their tasks (e.g. 'what are my tasks', "
-                "'do I have anything today', 'show my tasks', 'I meant tasks for today'). "
+                "'do I have anything today', 'show my tasks'). "
                 "Set filter to 'today' if they're asking about today specifically, 'overdue' if asking about "
                 "late/missed tasks, otherwise 'all'.\n"
-                "Use COMPLETE_TASK when they want to mark a numbered task done. "
+                "Use COMPLETE_TASK ONLY when the user names ONE specific task number to mark done. "
+                "If the user asks to complete/finish MULTIPLE or ALL tasks at once, that is not supported yet — "
+                "classify it as CHAT instead, and do not pretend to complete anything.\n"
                 "Use CHAT for everything else, including questions and normal conversation."
             )
         },
@@ -72,6 +99,7 @@ def route_message(user_input):
         return json.loads(raw)
     except json.JSONDecodeError:
         return {"intent": "CHAT"}
+
 
 def phrase_skill_result(user_input, raw_result, conversation):
     """Takes a raw, factual skill result and asks the model to phrase it naturally,
@@ -90,7 +118,8 @@ def phrase_skill_result(user_input, raw_result, conversation):
         }
     ]
     result = ollama.chat(model=MODEL, messages=phrasing_messages)
-    return result["message"]["content"]
+    return strip_role_leak(result["message"]["content"])
+
 
 memories = load_memory()
 memory_text = "\n".join(memories) if memories else "Nothing yet."
@@ -99,13 +128,14 @@ conversation = [
     {
         "role": "system",
         "content": (
-            "You are Mimir, the user's personal local AI assistant.\n\n"
+            f"{MIMIR_IDENTITY}\n\n"
             f"Here is what you currently know about the user, and NOTHING ELSE:\n{memory_text}\n\n"
             "STRICT RULES:\n"
             "- Only state facts about the user that appear explicitly above, or that the user has just said in this conversation.\n"
             "- Never invent, assume, or guess additional personal details (places, dates, institutions, events) that were not explicitly stated.\n"
             "- If you don't know something about the user, say so plainly instead of guessing.\n"
-            "- It is better to say 'I don't have that information' than to make something up."
+            "- It is better to say 'I don't have that information' than to make something up.\n"
+            "- Never claim to have completed, changed, or updated a task unless you were explicitly told the exact result of that action."
         )
     }
 ]
@@ -122,6 +152,8 @@ while True:
     route = route_message(user_input)
     intent = route.get("intent", "CHAT")
 
+    raw_result = None
+
     if intent == "ADD_TASK":
         task_desc = route.get("task", user_input)
         due_date = route.get("due")
@@ -134,9 +166,6 @@ while True:
     elif intent == "COMPLETE_TASK":
         number = route.get("number", 0)
         raw_result = todo.complete_task(number)
-
-    else:
-        raw_result = None
 
     if raw_result is not None:
         reply = phrase_skill_result(user_input, raw_result, conversation)
@@ -152,7 +181,7 @@ while True:
         messages=conversation
     )
 
-    reply = response["message"]["content"]
+    reply = strip_role_leak(response["message"]["content"])
     print("Mimir:", reply)
 
     conversation.append({"role": "assistant", "content": reply})
