@@ -1,12 +1,17 @@
 [
   {
     "task": "repair the laptop",
-    "done": false,
+    "done": true,
     "due": null
   },
   {
     "task": "pay rent",
-    "done": false,
+    "done": true,
     "due": "2026-08-05"
+  },
+  {
+    "task": "go for a walk in the evening",
+    "done": true,
+    "due": "2026-07-22"
   }
 ]

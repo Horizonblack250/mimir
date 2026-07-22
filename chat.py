@@ -76,6 +76,7 @@ def route_message(user_input):
                 '{"intent": "ADD_TASK", "task": "the task description", "due": "YYYY-MM-DD" or null}\n'
                 '{"intent": "LIST_TASKS", "filter": "today" or "overdue" or "all"}\n'
                 '{"intent": "COMPLETE_TASK", "number": 1}\n'
+                '{"intent": "COMPLETE_ALL"}\n'
                 '{"intent": "CHAT"}\n\n'
                 "Use ADD_TASK when the user wants to add a NEW task/todo/reminder. "
                 "When resolving a date, IMPORTANT: always pick the next FUTURE occurrence relative to today. "
@@ -85,9 +86,8 @@ def route_message(user_input):
                 "'do I have anything today', 'show my tasks'). "
                 "Set filter to 'today' if they're asking about today specifically, 'overdue' if asking about "
                 "late/missed tasks, otherwise 'all'.\n"
-                "Use COMPLETE_TASK ONLY when the user names ONE specific task number to mark done. "
-                "If the user asks to complete/finish MULTIPLE or ALL tasks at once, that is not supported yet — "
-                "classify it as CHAT instead, and do not pretend to complete anything.\n"
+                "Use COMPLETE_TASK when the user names ONE specific task number to mark done. "
+                "Use COMPLETE_ALL when the user wants to mark ALL or EVERY task as done at once.\n"
                 "Use CHAT for everything else, including questions and normal conversation."
             )
         },
@@ -124,18 +124,22 @@ def phrase_skill_result(user_input, raw_result, conversation):
 memories = load_memory()
 memory_text = "\n".join(memories) if memories else "Nothing yet."
 
+task_summary = todo.list_tasks("all")
+
 conversation = [
     {
         "role": "system",
         "content": (
             f"{MIMIR_IDENTITY}\n\n"
             f"Here is what you currently know about the user, and NOTHING ELSE:\n{memory_text}\n\n"
+            f"Here is the user's CURRENT, real task list right now (this is ground truth, always trust this over your own memory of the conversation):\n{task_summary}\n\n"
             "STRICT RULES:\n"
             "- Only state facts about the user that appear explicitly above, or that the user has just said in this conversation.\n"
             "- Never invent, assume, or guess additional personal details (places, dates, institutions, events) that were not explicitly stated.\n"
             "- If you don't know something about the user, say so plainly instead of guessing.\n"
             "- It is better to say 'I don't have that information' than to make something up.\n"
-            "- Never claim to have completed, changed, or updated a task unless you were explicitly told the exact result of that action."
+            "- Never claim to have completed, changed, or updated a task unless you were explicitly told the exact result of that action.\n"
+            "- Never claim the task list is empty or different from what is shown above."
         )
     }
 ]
@@ -166,6 +170,9 @@ while True:
     elif intent == "COMPLETE_TASK":
         number = route.get("number", 0)
         raw_result = todo.complete_task(number)
+
+    elif intent == "COMPLETE_ALL":
+        raw_result = todo.complete_all()
 
     if raw_result is not None:
         reply = phrase_skill_result(user_input, raw_result, conversation)

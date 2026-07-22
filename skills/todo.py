@@ -71,3 +71,13 @@ def complete_task(index):
     tasks[index - 1]["done"] = True
     save_tasks(tasks)
     return f"Marked task {index} as done."
+
+def complete_all():
+    tasks = load_tasks()
+    if not tasks:
+        return "You have no tasks to complete."
+    count = sum(1 for t in tasks if not t["done"])
+    for t in tasks:
+        t["done"] = True
+    save_tasks(tasks)
+    return f"Marked {count} task(s) as done."
