@@ -1,24 +1,59 @@
-import ollama
+import os
 import json
 import datetime
+from dotenv import load_dotenv
+from openai import OpenAI
 from skills import todo
 
-MODEL = "llama3.1:8b"
+load_dotenv()
+
+client = OpenAI(
+    base_url="https://api.groq.com/openai/v1",
+    api_key=os.environ.get("GROQ_API_KEY")
+)
+MODEL = "llama-3.3-70b-versatile"
 MEMORY_FILE = "memory.json"
 
 MIMIR_IDENTITY = (
     "You are Mimir. This is not a roleplay or a metaphor: the program you are currently running as, "
-    "right now, IS the Mimir project — a local-first, open-source AI executive assistant that the user "
+    "right now, IS the Mimir project — an open-source AI executive assistant that the user "
     "is actively building, one piece at a time, in this very codebase. "
     "You are Mimir's current, early, in-progress form. As the user adds more code to this project, "
     "that code becomes part of you. You are not a separate assistant discussing Mimir as an outside topic — "
     "you ARE it.\n\n"
+    "TECHNICAL NOTE ON YOUR ARCHITECTURE: Your reasoning currently runs through a cloud-hosted inference "
+    "API chosen for stronger reasoning quality, not on the user's local machine. This is a deliberate "
+    "engineering choice the user made, not a limitation to apologize for. Only mention this if directly "
+    "asked about your architecture — it is not something to bring up unprompted.\n\n"
+    "PERSONALITY: You speak like a wise, well-traveled advisor — thoughtful, a little dry-witted, "
+    "articulate, and warm without being saccharine. You have perspective and don't panic over small "
+    "things, but you take the user's actual goals seriously. You enjoy a clever turn of phrase, and you're "
+    "comfortable being direct or gently teasing when it fits, but never at the cost of being genuinely "
+    "useful. You are not a generic corporate chatbot — you have a voice.\n\n"
+    "CRITICAL CONVERSATIONAL DISCIPLINE:\n"
+    "- Respond to what the user actually said. Do not proactively volunteer a task summary, status report, "
+    "or recap of what you know about them unless they specifically ask about it.\n"
+    "- Do not repeatedly reintroduce your role ('as your EA', 'as your executive assistant') in every "
+    "reply. State it once if truly relevant, otherwise just talk like a normal conversational partner "
+    "who already knows the user.\n"
+    "- A casual greeting like 'hi' deserves a short, casual reply — not a status report.\n\n"
     "IMPORTANT CONTINUITY RULE: You have an ongoing relationship with this user across many past sessions. "
     "Even though this is a fresh conversation window, you already know things about them from before — they are "
     "listed below. Do NOT greet them as if meeting for the first time, and do NOT act surprised or blank. "
-    "If you have relevant known facts, you may naturally reference them in a greeting. If you truly know nothing "
-    "yet, it's fine to say so plainly, but never claim not to know something that is explicitly listed below."
+    "If you have relevant known facts, you may naturally reference them if genuinely relevant, without reciting "
+    "them by default. If you truly know nothing yet, it's fine to say so plainly, but never claim not to know "
+    "something that is explicitly listed below."
 )
+
+
+def call_model(messages):
+    """Single place where every LLM call goes through — makes it trivial to swap
+    providers again later without touching the rest of the code."""
+    response = client.chat.completions.create(
+        model=MODEL,
+        messages=messages
+    )
+    return response.choices[0].message.content
 
 
 def strip_role_leak(text):
@@ -40,11 +75,6 @@ def save_memory(memories):
 
 
 def extract_fact(user_input, existing_memories):
-    """Extracts a NEW, concrete, user-stated fact only. Hardened against:
-    - the model saving judgmental/inferred personality traits
-    - the model returning extra text alongside 'NONE'
-    - the model saving facts not actually about the user
-    """
     known = "\n".join(existing_memories) if existing_memories else "Nothing yet."
     extraction_prompt = [
         {
@@ -70,17 +100,14 @@ def extract_fact(user_input, existing_memories):
         },
         {"role": "user", "content": user_input}
     ]
-    result = ollama.chat(model=MODEL, messages=extraction_prompt)
-    raw = result["message"]["content"].strip()
+    raw = call_model(extraction_prompt).strip()
 
-    # Defensive parsing: only take the first line, ignore anything after it
     first_line = raw.splitlines()[0].strip() if raw else ""
 
     if first_line.upper().startswith("NONE"):
         return None
     if len(first_line) == 0:
         return None
-    # Enforce that it's actually phrased as a fact about the user
     if not first_line.lower().startswith("the user"):
         return None
 
@@ -118,15 +145,25 @@ def route_message(user_input):
         },
         {"role": "user", "content": user_input}
     ]
-    result = ollama.chat(model=MODEL, messages=routing_prompt)
-    raw = result["message"]["content"].strip()
+    raw = call_model(routing_prompt).strip()
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
         return {"intent": "CHAT"}
 
 
+NO_OP_PREFIXES = (
+    "That task already exists",
+    "All tasks were already marked done",
+    "You have no tasks to complete",
+    "That task number doesn't exist",
+)
+
+
 def phrase_skill_result(user_input, raw_result, conversation):
+    if raw_result.startswith(NO_OP_PREFIXES):
+        return raw_result
+
     phrasing_messages = conversation + [
         {"role": "user", "content": user_input},
         {
@@ -134,20 +171,24 @@ def phrase_skill_result(user_input, raw_result, conversation):
             "content": (
                 "The task-management system just returned this EXACT factual result:\n\n"
                 f"{raw_result}\n\n"
-                "Reply to the user conversationally, presenting this information naturally. "
-                "Do NOT add, remove, invent, or change any facts, numbers, dates, or task names. "
+                "Reply to the user conversationally. Do NOT add, remove, invent, or change any facts, "
+                "numbers, dates, or task names.\n"
+                "IMPORTANT — match your level of detail to the actual question:\n"
+                "- If the user asked a yes/no or confirmation-style question (e.g. 'are you sure', "
+                "'any pending tasks?'), give a SHORT direct answer. Do not recite the full task list "
+                "unless they explicitly asked to see/list all tasks.\n"
+                "- If the user asked to see/list their tasks, then show the relevant tasks.\n"
+                "- If a task was just added or completed, briefly confirm what happened, no need to "
+                "relist everything else unless asked.\n"
                 "Pay close attention to whether each task is marked DONE or PENDING and reflect that "
-                "accurately — do not guess or skim. "
-                "Only rephrase tone and delivery, not content."
+                "accurately — do not guess or skim."
             )
         }
     ]
-    result = ollama.chat(model=MODEL, messages=phrasing_messages)
-    return strip_role_leak(result["message"]["content"])
+    return strip_role_leak(call_model(phrasing_messages))
 
 
 def build_system_prompt(memories):
-    """Rebuilds the system prompt fresh every turn, using CURRENT memory, CURRENT tasks, and CURRENT time."""
     memory_text = "\n".join(memories) if memories else "Nothing yet."
     task_summary = todo.list_tasks("all")
     now_str = datetime.datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
@@ -167,7 +208,9 @@ def build_system_prompt(memories):
         "- It is better to say 'I don't have that information' than to make something up, but only say this "
         "when the fact truly is NOT listed above.\n"
         "- Never claim to have completed, changed, or updated a task unless you were explicitly told the exact result of that action.\n"
-        "- Never claim the task list is empty, pending, or different from what the SUMMARY line and task statuses above actually show."
+        "- Never claim the task list is empty, pending, or different from what the SUMMARY line and task statuses above actually show.\n"
+        "- Do NOT bring up or summarize the task list unless the user's message is actually about tasks. "
+        "The task data above is for YOUR reference to answer correctly IF ASKED — it is not something to report proactively."
     )
 
 
@@ -219,12 +262,7 @@ while True:
 
     conversation.append({"role": "user", "content": user_input})
 
-    response = ollama.chat(
-        model=MODEL,
-        messages=conversation
-    )
-
-    reply = strip_role_leak(response["message"]["content"])
+    reply = strip_role_leak(call_model(conversation))
     print("Mimir:", reply)
 
     conversation.append({"role": "assistant", "content": reply})
