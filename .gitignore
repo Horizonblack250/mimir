@@ -3,3 +3,6 @@ __pycache__/
 .venv/
 .env
 venv/
+memory.json
+tasks.json
+conversation_log.jsonl
