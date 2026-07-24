@@ -4,6 +4,7 @@ import datetime
 from dotenv import load_dotenv
 from openai import OpenAI
 from skills import todo
+from skills import conversation_log
 
 load_dotenv()
 
@@ -256,9 +257,17 @@ while True:
         print("Mimir:", reply)
         conversation.append({"role": "user", "content": user_input})
         conversation.append({"role": "assistant", "content": reply})
+        conversation_log.log_exchange(user_input, reply)
         continue
 
     conversation[0]["content"] = build_system_prompt(memories)
+
+    # Search past conversation logs for anything relevant to this message,
+    # and add it as optional context -- Mimir decides whether it's actually useful.
+    matches = conversation_log.search_log(user_input)
+    if matches:
+        history_context = conversation_log.format_matches_for_prompt(matches)
+        conversation.append({"role": "system", "content": history_context})
 
     conversation.append({"role": "user", "content": user_input})
 
@@ -266,6 +275,8 @@ while True:
     print("Mimir:", reply)
 
     conversation.append({"role": "assistant", "content": reply})
+
+    conversation_log.log_exchange(user_input, reply)
 
     fact = extract_fact(user_input, memories)
     if fact:
