@@ -6,3 +6,5 @@ venv/
 memory.json
 tasks.json
 conversation_log.jsonl
+credentials.json
+token.json
