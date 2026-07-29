@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 from openai import OpenAI
 from skills import todo
 from skills import conversation_log
+from skills import gmail_reader
 
 load_dotenv()
 
@@ -138,6 +139,7 @@ def route_message(user_input):
                 '{"intent": "LIST_TASKS", "filter": "today" or "overdue" or "all"}\n'
                 '{"intent": "COMPLETE_TASK", "number": 1}\n'
                 '{"intent": "COMPLETE_ALL"}\n'
+                '{"intent": "CHECK_EMAIL"}\n'
                 '{"intent": "CHAT"}\n\n'
                 "Use ADD_TASK when the user wants to add a NEW task/todo/reminder. "
                 "If they mention a specific TIME (e.g. '6pm', 'at 5:30'), include it in the due datetime. "
@@ -148,6 +150,7 @@ def route_message(user_input):
                 "Set filter to 'today', 'overdue', or 'all' as appropriate.\n"
                 "Use COMPLETE_TASK when the user names ONE specific task number to mark done. "
                 "Use COMPLETE_ALL when the user wants to mark ALL or EVERY task as done at once.\n"
+                "Use CHECK_EMAIL when the user asks about their email, inbox, or unread messages.\n"
                 "Use CHAT for everything else, including questions and normal conversation, including "
                 "questions about facts the user has told you (like names, relationships, preferences), "
                 "and questions about the current time or date."
@@ -196,6 +199,36 @@ def phrase_skill_result(user_input, raw_result, conversation):
         }
     ]
     return strip_role_leak(call_model(phrasing_messages))
+
+
+def filter_job_related_emails(raw_email_summary):
+    """Takes the raw unread-email list and asks the model to identify ONLY the
+    ones that are genuinely job/career-related -- filtering out newsletters,
+    promotions, bank alerts, etc."""
+    if raw_email_summary.startswith("Gmail isn't connected") or raw_email_summary.startswith("Couldn't reach Gmail"):
+        return raw_email_summary
+
+    filter_prompt = [
+        {
+            "role": "system",
+            "content": (
+                "Here is a numbered list of the user's unread emails:\n\n"
+                f"{raw_email_summary}\n\n"
+                "Identify ONLY the emails that are genuinely related to job hunting or career opportunities: "
+                "job postings, recruiter outreach, application status updates, interview invitations, "
+                "offer letters, or similar. Do NOT include newsletters, promotions, bank/financial alerts, "
+                "workshop invites, or general subscriptions, even if they mention words like 'career' or "
+                "'learn' in passing.\n\n"
+                "Reply with ONLY the matching entries, reformatted as a clean numbered list (renumber "
+                "starting from 1), keeping the sender, subject, and preview for each. "
+                "If none of the emails are job-related, reply with exactly: NONE"
+            )
+        }
+    ]
+    result = call_model(filter_prompt).strip()
+    if result.upper() == "NONE":
+        return "SUMMARY: 0 job-related unread emails.\nNo job-related emails right now -- the rest looks like newsletters/promotions."
+    return result
 
 
 def build_system_prompt(memories):
@@ -259,6 +292,10 @@ while True:
 
     elif intent == "COMPLETE_ALL":
         raw_result = todo.complete_all()
+
+    elif intent == "CHECK_EMAIL":
+        raw_inbox = gmail_reader.get_unread_summary()
+        raw_result = filter_job_related_emails(raw_inbox)
 
     if raw_result is not None:
         conversation[0]["content"] = build_system_prompt(memories)
