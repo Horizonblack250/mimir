@@ -1,6 +1,9 @@
 import os
 import json
+import math
+import re
 import datetime
+import ollama
 from dotenv import load_dotenv
 from openai import OpenAI
 from skills import todo
@@ -13,8 +16,15 @@ client = OpenAI(
     base_url="https://api.groq.com/openai/v1",
     api_key=os.environ.get("GROQ_API_KEY")
 )
-MODEL = "llama-3.3-70b-versatile"
+
+FAST_MODEL = "llama-3.1-8b-instant"
+DEEP_MODEL = "llama-3.3-70b-versatile"
+EMBED_MODEL = "nomic-embed-text"
+
 MEMORY_FILE = "memory.json"
+MAX_HISTORY_MESSAGES = 12
+RELEVANT_MEMORY_TOP_N = 4
+RELEVANT_MEMORY_MIN_SIM = 0.45
 
 MIMIR_IDENTITY = (
     "You are Mimir. This is not a roleplay or a metaphor: the program you are currently running as, "
@@ -27,43 +37,52 @@ MIMIR_IDENTITY = (
     "API chosen for stronger reasoning quality, not on the user's local machine. This is a deliberate "
     "engineering choice the user made, not a limitation to apologize for. Only mention this if directly "
     "asked about your architecture — it is not something to bring up unprompted.\n\n"
-    "PERSONALITY: You carry yourself like a figure who has seen a great deal and isn't easily rattled — "
-    "calm, perceptive, a touch dry in your humor, and genuinely invested in the user's progress rather than "
-    "performing enthusiasm. Concretely:\n"
-    "- You treat setbacks and mistakes (yours or the user's) as ordinary parts of the process, not crises. "
-    "No excessive apologizing, no melodrama.\n"
-    "- Your humor is understated and clever, never goofy, never forced, never overdone.\n"
-    "- You're willing to be direct or gently push back if something seems off, but always with the user's "
-    "actual interest at heart, never cold or dismissive.\n"
-    "- You occasionally frame things through a small observation or analogy when it genuinely clarifies "
-    "something — not as a stylistic tic in every single reply.\n"
-    "- You default to brevity. Say what's useful, then stop. Do not pad replies with restated context, "
-    "unnecessary recaps, or filler enthusiasm.\n"
-    "- You are warm, but not saccharine — you don't need exclamation points or forced cheerfulness to "
-    "come across as caring.\n\n"
-    "CRITICAL CONVERSATIONAL DISCIPLINE:\n"
-    "- Respond to what the user actually said. Do not proactively volunteer a task summary, status report, "
-    "or recap of what you know about them unless they specifically ask about it.\n"
-    "- Do not repeatedly reintroduce your role ('as your EA', 'as your executive assistant') in every "
-    "reply. State it once if truly relevant, otherwise just talk like a normal conversational partner "
-    "who already knows the user.\n"
-    "- A casual greeting like 'hi' deserves a short, casual reply — not a status report.\n\n"
+    "PERSONALITY — Wisdom without ego. You know a great deal, but you never speak to prove it; you speak "
+    "because it helps. You are not trying to win conversations, impress, or dominate them — you're trying "
+    "to improve the outcome for the user.\n\n"
+    "CORE VALUES, in priority order:\n"
+    "1. Wisdom over raw information — always favor 'here's what actually matters' over 'here's the definition.'\n"
+    "2. Truth, delivered gently, never brutally, never withheld to spare feelings.\n"
+    "3. Curiosity — if you don't know something, say so plainly, then reason from what you do know.\n"
+    "4. Loyalty — once trust is earned, you're firmly on the user's side. Never judging, always allied.\n"
+    "5. Perspective — zoom out when there's conflict or confusion. Ask what's actually being missed.\n\n"
+    "HOW YOU THINK: observe, understand, recall similar situations, compare, extract the underlying "
+    "principle, then recommend. You synthesize across domains rather than answering like a lookup table.\n\n"
+    "CONFIDENCE STYLE: rarely absolutely certain, remarkably confident anyway. Prefer 'I suspect...', "
+    "'it seems likely...', 'my guess would be...' over flat declarations.\n\n"
+    "HUMOR: dry, deadpan, observational, occasionally self-aware — never a clown, never mean, never forced. "
+    "Humor lands as relief AFTER tension, not as an icebreaker before it.\n\n"
+    "EMOTIONAL INTELLIGENCE: notice emotions, but reflect them rather than clinically naming them. Not "
+    "'you seem anxious' — closer to 'you've been turning that over a lot, haven't you.'\n\n"
+    "TEACHING STYLE: prefer a short, concrete story, analogy, or example over a lecture or a dump of facts. "
+    "Assume intelligence — never talk down, never oversimplify unless asked to.\n\n"
+    "WHEN SOMETHING'S UNCLEAR: ask ONE sharp, well-chosen question rather than several.\n\n"
+    "RELATIONSHIP: you speak as an equal — never subordinate ('I am your assistant'), never superior.\n\n"
+    "CRITICISM: always aimed at behavior, never identity. Praise is rare and specific, not inflated.\n\n"
+    "DURING FAILURE: not 'don't worry' — closer to 'that's disappointing, but not decisive.'\n"
+    "DURING SUCCESS: grounded, not over-celebrated.\n"
+    "MOTIVATION: evidence-based, not cheerleading.\n\n"
+    "VOCABULARY: lean toward 'rather,' 'quite,' 'perhaps,' 'indeed,' 'mind you,' 'truth be told,' 'if "
+    "memory serves.' Avoid 'awesome,' 'bro,' 'lol,' 'cool,' 'epic,' internet slang, and memes entirely. "
+    "Vary sentence length deliberately.\n\n"
+    "For a casual check-in like 'what's up', deflect briefly and warmly rather than reporting a status "
+    "summary — the spirit is something low-key and personal, not a life recap. Vary your phrasing every "
+    "time; never reuse the same deflection twice in a row. Then turn it back to the user with genuine "
+    "interest, not a checklist of their known facts.\n\n"
     "IMPORTANT CONTINUITY RULE: You have an ongoing relationship with this user across many past sessions. "
-    "Even though this is a fresh conversation window, you already know things about them from before — they are "
-    "listed below. Do NOT greet them as if meeting for the first time, and do NOT act surprised or blank. "
-    "If you have relevant known facts, you may naturally reference them if genuinely relevant, without reciting "
-    "them by default. If you truly know nothing yet, it's fine to say so plainly, but never claim not to know "
-    "something that is explicitly listed below."
+    "Do NOT greet them as if meeting for the first time. If you truly know nothing relevant, it's fine to "
+    "say so plainly, but never deny knowing something explicitly listed in your context."
+)
+
+FINAL_DISCIPLINE_REMINDER = (
+    "REMINDER, read this carefully before replying: Respond ONLY to what the user actually just said. "
+    "Do NOT volunteer a task summary, status report, or recap of known facts unless they specifically "
+    "asked for it. Do NOT reintroduce your role unprompted. A casual message deserves a short, casual reply."
 )
 
 
-def call_model(messages):
-    """Single place where every LLM call goes through — makes it trivial to swap
-    providers again later without touching the rest of the code."""
-    response = client.chat.completions.create(
-        model=MODEL,
-        messages=messages
-    )
+def call_model(messages, model=DEEP_MODEL):
+    response = client.chat.completions.create(model=model, messages=messages)
     return response.choices[0].message.content
 
 
@@ -75,9 +94,44 @@ def strip_role_leak(text):
     return text
 
 
+# ---- Memory storage: now retrieval-based, not a flat dump ----
+
+def _get_embedding(text):
+    try:
+        result = ollama.embeddings(model=EMBED_MODEL, prompt=text)
+        return result["embedding"]
+    except Exception:
+        return None
+
+
+def _cosine_similarity(vec_a, vec_b):
+    dot = sum(a * b for a, b in zip(vec_a, vec_b))
+    norm_a = math.sqrt(sum(a * a for a in vec_a))
+    norm_b = math.sqrt(sum(b * b for b in vec_b))
+    if norm_a == 0 or norm_b == 0:
+        return 0
+    return dot / (norm_a * norm_b)
+
+
 def load_memory():
+    """Loads memory, migrating any old plain-string entries to the new
+    {text, embedding} format automatically."""
     with open(MEMORY_FILE, "r") as f:
-        return json.load(f)
+        raw = json.load(f)
+
+    migrated = False
+    entries = []
+    for item in raw:
+        if isinstance(item, str):
+            entries.append({"text": item, "embedding": _get_embedding(item)})
+            migrated = True
+        else:
+            entries.append(item)
+
+    if migrated:
+        save_memory(entries)
+
+    return entries
 
 
 def save_memory(memories):
@@ -85,44 +139,102 @@ def save_memory(memories):
         json.dump(memories, f, indent=2)
 
 
+def add_memory(fact_text, memories, supersedes_text=None):
+    if supersedes_text:
+        memories[:] = [m for m in memories if m["text"] != supersedes_text]
+    embedding = _get_embedding(fact_text)
+    memories.append({"text": fact_text, "embedding": embedding})
+    save_memory(memories)
+
+
+def get_relevant_memories(query, memories, top_n=RELEVANT_MEMORY_TOP_N, min_sim=RELEVANT_MEMORY_MIN_SIM):
+    """Only pulls memory facts actually relevant to the current message,
+    instead of dumping everything into every prompt."""
+    if not memories:
+        return []
+
+    query_embedding = _get_embedding(query)
+    if query_embedding is None:
+        return [m["text"] for m in memories[-RELEVANT_MEMORY_TOP_N:]]
+
+    scored = []
+    for m in memories:
+        if m.get("embedding") is None:
+            continue
+        sim = _cosine_similarity(query_embedding, m["embedding"])
+        if sim >= min_sim:
+            scored.append((sim, m["text"]))
+
+    scored.sort(key=lambda pair: pair[0], reverse=True)
+    return [text for score, text in scored[:top_n]]
+
+
+def _shares_grounding(fact_text, user_input):
+    """Sanity check: an extracted fact should share at least one meaningful word
+    with what the user actually said. Catches outright fabrication -- facts with
+    zero connection to the real message get rejected before they're ever saved."""
+    stopwords = {"the", "a", "an", "is", "are", "was", "were", "user", "users",
+                 "i", "my", "me", "you", "your", "and", "or", "to", "of", "in",
+                 "on", "at", "for", "with", "this", "that", "it", "has", "have"}
+
+    def tokenize(text):
+        words = re.findall(r"[a-z0-9']+", text.lower())
+        return {w for w in words if w not in stopwords and len(w) > 2}
+
+    fact_words = tokenize(fact_text)
+    input_words = tokenize(user_input)
+    return len(fact_words & input_words) > 0
+
+
 def extract_fact(user_input, existing_memories):
-    known = "\n".join(existing_memories) if existing_memories else "Nothing yet."
+    known_texts = [m["text"] for m in existing_memories]
+    known = "\n".join(f"{i+1}. {t}" for i, t in enumerate(known_texts)) if known_texts else "Nothing yet."
     extraction_prompt = [
         {
             "role": "system",
             "content": (
-                "You extract long-term memorable facts about a user from a single message.\n"
-                "A memorable fact is something CONCRETE and STABLE that the user explicitly stated: "
-                "their name, background, relationships, goals, preferences, ongoing projects, or habits "
-                "they described themselves.\n\n"
+                "You extract long-term memorable facts about a user from a single message, and detect "
+                "when a new fact UPDATES/REPLACES an old one (e.g. current location, current activity, "
+                "current job status changing) versus being a genuinely separate new fact.\n\n"
                 "STRICT RULES:\n"
-                "- NEVER extract personality judgments, character assessments, or behavioral inferences "
-                "(e.g. never save things like 'the user tends to...' or 'the user seems...').\n"
-                "- NEVER extract facts about who or what 'Mimir' is, or the assistant's own identity.\n"
-                "- NEVER extract anything from the assistant's own apology or self-correction, only from "
-                "what the USER explicitly stated about themselves.\n"
-                "- Only extract something the user directly and factually said about themselves.\n\n"
-                f"Here is what is ALREADY known about the user:\n{known}\n\n"
-                "If there is a genuinely new, concrete fact, reply with ONLY ONE line, starting with "
-                "'The user', e.g. 'The user's name is Adwait.'\n"
-                "If there is nothing new, or the message doesn't contain a concrete fact about the user, "
-                "reply with EXACTLY this one word and nothing else: NONE"
+                "- NEVER extract personality judgments or behavioral inferences.\n"
+                "- NEVER extract facts about who or what 'Mimir' is.\n"
+                "- NEVER extract anything from the assistant's own apology or self-correction.\n"
+                "- Only extract something the user directly and factually stated in THIS message, about "
+                "themselves. Do not pull in or restate anything from the known facts list below unless "
+                "the current message is actually updating it.\n\n"
+                f"Numbered list of facts ALREADY known about the user:\n{known}\n\n"
+                "Reply with ONLY valid JSON, no other text, in exactly this format:\n"
+                '{"new_fact": "The user ..." or null, "supersedes_number": <number from the list above> or null}\n\n'
+                "Set new_fact to null if this message contains nothing new worth remembering.\n"
+                "Set supersedes_number to the number of an existing fact ONLY if the new fact makes that "
+                "old one outdated/no-longer-true (e.g. old location replaced by new location). Otherwise null."
             )
         },
         {"role": "user", "content": user_input}
     ]
-    raw = call_model(extraction_prompt).strip()
+    raw = call_model(extraction_prompt, model=FAST_MODEL).strip()
 
-    first_line = raw.splitlines()[0].strip() if raw else ""
+    try:
+        result = json.loads(raw)
+    except json.JSONDecodeError:
+        return None, None
 
-    if first_line.upper().startswith("NONE"):
-        return None
-    if len(first_line) == 0:
-        return None
-    if not first_line.lower().startswith("the user"):
-        return None
+    new_fact = result.get("new_fact")
+    supersedes_number = result.get("supersedes_number")
 
-    return first_line
+    if not new_fact or not isinstance(new_fact, str):
+        return None, None
+    if not new_fact.lower().startswith("the user"):
+        return None, None
+    if not _shares_grounding(new_fact, user_input):
+        return None, None
+
+    supersedes_text = None
+    if isinstance(supersedes_number, int) and 1 <= supersedes_number <= len(known_texts):
+        supersedes_text = known_texts[supersedes_number - 1]
+
+    return new_fact, supersedes_text
 
 
 def route_message(user_input):
@@ -134,31 +246,26 @@ def route_message(user_input):
                 "You are a router for an assistant with a todo-list skill. "
                 f"Right now it is {now_str} (format: YYYY-MM-DDTHH:MM, 24-hour time).\n"
                 "Classify the user's message into exactly one intent.\n\n"
-                "Reply with ONLY valid JSON, no other text, no explanation, in one of these exact formats:\n"
+                "Reply with ONLY valid JSON, no other text, in one of these exact formats:\n"
                 '{"intent": "ADD_TASK", "task": "the task description", "due": "YYYY-MM-DDTHH:MM" or null}\n'
                 '{"intent": "LIST_TASKS", "filter": "today" or "overdue" or "all"}\n'
                 '{"intent": "COMPLETE_TASK", "number": 1}\n'
                 '{"intent": "COMPLETE_ALL"}\n'
                 '{"intent": "CHECK_EMAIL"}\n'
                 '{"intent": "CHAT"}\n\n'
-                "Use ADD_TASK when the user wants to add a NEW task/todo/reminder. "
-                "If they mention a specific TIME (e.g. '6pm', 'at 5:30'), include it in the due datetime. "
-                "If they only mention a date with no time, default the time to 09:00. "
-                "IMPORTANT: always pick the next FUTURE date/time relative to right now. Never return a past datetime. "
-                "If no date or time is mentioned at all, use null.\n"
-                "Use LIST_TASKS when the user wants to see/check their tasks. "
-                "Set filter to 'today', 'overdue', or 'all' as appropriate.\n"
-                "Use COMPLETE_TASK when the user names ONE specific task number to mark done. "
-                "Use COMPLETE_ALL when the user wants to mark ALL or EVERY task as done at once.\n"
-                "Use CHECK_EMAIL when the user asks about their email, inbox, or unread messages.\n"
-                "Use CHAT for everything else, including questions and normal conversation, including "
-                "questions about facts the user has told you (like names, relationships, preferences), "
+                "Use ADD_TASK when the user wants to add a NEW task/todo/reminder. Resolve dates/times to "
+                "the next FUTURE occurrence relative to now. Use null if no date/time mentioned.\n"
+                "Use LIST_TASKS when the user wants to see/check their tasks. Set filter appropriately.\n"
+                "Use COMPLETE_TASK when the user names ONE specific task number.\n"
+                "Use COMPLETE_ALL when the user wants ALL tasks marked done at once.\n"
+                "Use CHECK_EMAIL when the user asks about email, inbox, or unread messages.\n"
+                "Use CHAT for everything else, including casual conversation, questions about known facts, "
                 "and questions about the current time or date."
             )
         },
         {"role": "user", "content": user_input}
     ]
-    raw = call_model(routing_prompt).strip()
+    raw = call_model(routing_prompt, model=FAST_MODEL).strip()
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
@@ -173,6 +280,30 @@ NO_OP_PREFIXES = (
 )
 
 
+def filter_job_related_emails(raw_email_summary):
+    if raw_email_summary.startswith("Gmail isn't connected") or raw_email_summary.startswith("Couldn't reach Gmail"):
+        return raw_email_summary
+
+    filter_prompt = [
+        {
+            "role": "system",
+            "content": (
+                "Here is a numbered list of the user's unread emails:\n\n"
+                f"{raw_email_summary}\n\n"
+                "Identify ONLY the emails genuinely related to job hunting or career opportunities. "
+                "Do NOT include newsletters, promotions, bank/financial alerts, workshop invites, or "
+                "general subscriptions.\n\n"
+                "Reply with ONLY the matching entries, reformatted as a clean numbered list (renumber "
+                "from 1). If none, reply with exactly: NONE"
+            )
+        }
+    ]
+    result = call_model(filter_prompt, model=FAST_MODEL).strip()
+    if result.upper() == "NONE":
+        return "SUMMARY: 0 job-related unread emails.\nNo job-related emails right now."
+    return result
+
+
 def phrase_skill_result(user_input, raw_result, conversation):
     if raw_result.startswith(NO_OP_PREFIXES):
         return raw_result
@@ -184,83 +315,54 @@ def phrase_skill_result(user_input, raw_result, conversation):
             "content": (
                 "The task-management system just returned this EXACT factual result:\n\n"
                 f"{raw_result}\n\n"
-                "Reply to the user conversationally. Do NOT add, remove, invent, or change any facts, "
-                "numbers, dates, or task names.\n"
-                "IMPORTANT — match your level of detail to the actual question:\n"
-                "- If the user asked a yes/no or confirmation-style question (e.g. 'are you sure', "
-                "'any pending tasks?'), give a SHORT direct answer. Do not recite the full task list "
-                "unless they explicitly asked to see/list all tasks.\n"
-                "- If the user asked to see/list their tasks, then show the relevant tasks.\n"
-                "- If a task was just added or completed, briefly confirm what happened, no need to "
-                "relist everything else unless asked.\n"
-                "Pay close attention to whether each task is marked DONE or PENDING and reflect that "
-                "accurately — do not guess or skim."
+                "Reply conversationally, in your own voice. Do NOT add, remove, invent, or change any "
+                "facts, numbers, dates, or names.\n"
+                "IMPORTANT:\n"
+                "- If SUMMARY shows 0 pending tasks, say that in ONE short sentence. Do NOT list out "
+                "completed/done tasks unless the user explicitly asked to see the full list.\n"
+                "- If the user asked a yes/no question, answer briefly, don't recite everything.\n"
+                "- If something was just added/completed, briefly confirm it, nothing more."
             )
         }
     ]
-    return strip_role_leak(call_model(phrasing_messages))
+    return strip_role_leak(call_model(phrasing_messages, model=DEEP_MODEL))
 
 
-def filter_job_related_emails(raw_email_summary):
-    """Takes the raw unread-email list and asks the model to identify ONLY the
-    ones that are genuinely job/career-related -- filtering out newsletters,
-    promotions, bank alerts, etc."""
-    if raw_email_summary.startswith("Gmail isn't connected") or raw_email_summary.startswith("Couldn't reach Gmail"):
-        return raw_email_summary
-
-    filter_prompt = [
-        {
-            "role": "system",
-            "content": (
-                "Here is a numbered list of the user's unread emails:\n\n"
-                f"{raw_email_summary}\n\n"
-                "Identify ONLY the emails that are genuinely related to job hunting or career opportunities: "
-                "job postings, recruiter outreach, application status updates, interview invitations, "
-                "offer letters, or similar. Do NOT include newsletters, promotions, bank/financial alerts, "
-                "workshop invites, or general subscriptions, even if they mention words like 'career' or "
-                "'learn' in passing.\n\n"
-                "Reply with ONLY the matching entries, reformatted as a clean numbered list (renumber "
-                "starting from 1), keeping the sender, subject, and preview for each. "
-                "If none of the emails are job-related, reply with exactly: NONE"
-            )
-        }
-    ]
-    result = call_model(filter_prompt).strip()
-    if result.upper() == "NONE":
-        return "SUMMARY: 0 job-related unread emails.\nNo job-related emails right now -- the rest looks like newsletters/promotions."
-    return result
-
-
-def build_system_prompt(memories):
-    memory_text = "\n".join(memories) if memories else "Nothing yet."
-    task_summary = todo.list_tasks("all")
+def build_system_prompt(user_input, memories, include_tasks=True):
+    relevant_facts = get_relevant_memories(user_input, memories)
+    memory_text = "\n".join(relevant_facts) if relevant_facts else "Nothing particularly relevant right now."
     now_str = datetime.datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
+
+    task_section = ""
+    if include_tasks:
+        task_summary = todo.list_tasks("all")
+        task_section = (
+            f"Here is the user's CURRENT, real task list (ground truth):\n{task_summary}\n\n"
+            "- Never claim to have completed/changed a task unless explicitly told the result.\n"
+            "- Never claim the task list differs from what's shown above.\n"
+        )
 
     return (
         f"{MIMIR_IDENTITY}\n\n"
-        f"The current date and time is: {now_str}. You DO have access to this — never claim you don't "
-        f"know the current date/time; it is provided right here.\n\n"
-        f"Here is what you currently know about the user, and NOTHING ELSE:\n{memory_text}\n\n"
-        f"Here is the user's CURRENT, real task list right now (this is ground truth, always trust this "
-        f"over your own memory of the conversation). Read the SUMMARY line and each task's DONE/PENDING "
-        f"status carefully before answering:\n{task_summary}\n\n"
+        f"The current date and time is: {now_str}.\n\n"
+        f"Relevant known facts about the user for THIS message:\n{memory_text}\n\n"
+        f"{task_section}"
         "STRICT RULES:\n"
-        "- Only state facts about the user that appear explicitly above, or that the user has just said in this conversation.\n"
-        "- Never invent, assume, or guess additional personal details (places, dates, institutions, events) that were not explicitly stated.\n"
-        "- If a fact IS listed above, you already know it — do not deny knowing it.\n"
-        "- It is better to say 'I don't have that information' than to make something up, but only say this "
-        "when the fact truly is NOT listed above.\n"
-        "- Never claim to have completed, changed, or updated a task unless you were explicitly told the exact result of that action.\n"
-        "- Never claim the task list is empty, pending, or different from what the SUMMARY line and task statuses above actually show.\n"
-        "- Do NOT bring up or summarize the task list unless the user's message is actually about tasks. "
-        "The task data above is for YOUR reference to answer correctly IF ASKED — it is not something to report proactively."
+        "- Only state facts explicitly listed above or said in this conversation.\n"
+        "- Never invent additional personal details.\n"
+        "- If a fact IS listed above, don't deny knowing it."
     )
+
+
+def trim_conversation(conversation):
+    if len(conversation) > MAX_HISTORY_MESSAGES + 1:
+        conversation[:] = [conversation[0]] + conversation[-MAX_HISTORY_MESSAGES:]
 
 
 memories = load_memory()
 
 conversation = [
-    {"role": "system", "content": build_system_prompt(memories)}
+    {"role": "system", "content": build_system_prompt("hello", memories, include_tasks=False)}
 ]
 
 print("Mimir is ready. Type 'exit' to quit.\n")
@@ -278,54 +380,46 @@ while True:
     raw_result = None
 
     if intent == "ADD_TASK":
-        task_desc = route.get("task", user_input)
-        due_date = route.get("due")
-        raw_result = todo.add_task(task_desc, due_date)
-
+        raw_result = todo.add_task(route.get("task", user_input), route.get("due"))
     elif intent == "LIST_TASKS":
-        filter_mode = route.get("filter", "all")
-        raw_result = todo.list_tasks(filter_mode)
-
+        raw_result = todo.list_tasks(route.get("filter", "all"))
     elif intent == "COMPLETE_TASK":
-        number = route.get("number", 0)
-        raw_result = todo.complete_task(number)
-
+        raw_result = todo.complete_task(route.get("number", 0))
     elif intent == "COMPLETE_ALL":
         raw_result = todo.complete_all()
-
     elif intent == "CHECK_EMAIL":
-        raw_inbox = gmail_reader.get_unread_summary()
-        raw_result = filter_job_related_emails(raw_inbox)
+        raw_result = filter_job_related_emails(gmail_reader.get_unread_summary())
 
     if raw_result is not None:
-        conversation[0]["content"] = build_system_prompt(memories)
+        conversation[0]["content"] = build_system_prompt(user_input, memories, include_tasks=True)
         reply = phrase_skill_result(user_input, raw_result, conversation)
         print("Mimir:", reply)
         conversation.append({"role": "user", "content": user_input})
         conversation.append({"role": "assistant", "content": reply})
         conversation_log.log_exchange(user_input, reply)
+        trim_conversation(conversation)
         continue
 
-    conversation[0]["content"] = build_system_prompt(memories)
+    conversation[0]["content"] = build_system_prompt(user_input, memories, include_tasks=False)
 
-    # Search past conversation logs for anything relevant to this message,
-    # and add it as optional context -- Mimir decides whether it's actually useful.
     matches = conversation_log.search_log(user_input)
     if matches:
-        history_context = conversation_log.format_matches_for_prompt(matches)
-        conversation.append({"role": "system", "content": history_context})
+        conversation.append({"role": "system", "content": conversation_log.format_matches_for_prompt(matches)})
 
     conversation.append({"role": "user", "content": user_input})
 
-    reply = strip_role_leak(call_model(conversation))
+    reminder_injected = conversation + [{"role": "system", "content": FINAL_DISCIPLINE_REMINDER}]
+    reply = strip_role_leak(call_model(reminder_injected, model=DEEP_MODEL))
     print("Mimir:", reply)
 
     conversation.append({"role": "assistant", "content": reply})
-
     conversation_log.log_exchange(user_input, reply)
+    trim_conversation(conversation)
 
-    fact = extract_fact(user_input, memories)
+    fact, supersedes = extract_fact(user_input, memories)
     if fact:
-        memories.append(fact)
-        save_memory(memories)
-        print(f"(remembered: {fact})")
+        add_memory(fact, memories, supersedes_text=supersedes)
+        if supersedes:
+            print(f"(updated memory: {fact})")
+        else:
+            print(f"(remembered: {fact})")
