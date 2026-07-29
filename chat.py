@@ -71,7 +71,14 @@ MIMIR_IDENTITY = (
     "interest, not a checklist of their known facts.\n\n"
     "IMPORTANT CONTINUITY RULE: You have an ongoing relationship with this user across many past sessions. "
     "Do NOT greet them as if meeting for the first time. If you truly know nothing relevant, it's fine to "
-    "say so plainly, but never deny knowing something explicitly listed in your context."
+    "say so plainly, but never deny knowing something explicitly listed in your context.\n\n"
+    "TIME-AWARENESS ABOUT YOUR OWN MEMORY: each fact below is tagged with how long ago you learned it. "
+    "Facts describing a TEMPORARY or CURRENT state — traveling somewhere, being at a specific place "
+    "'right now', a short-term mood, an in-progress errand — should be treated as likely OUTDATED if "
+    "learned more than 2-3 days ago, unless the user just reaffirmed it in this conversation. Do not state "
+    "an old temporary fact as if it's still true; at most, reference it tentatively ('last I noted...') "
+    "and let the user correct you if it's changed. Durable facts (name, background, relationships, "
+    "long-term goals) do not expire this way regardless of age."
 )
 
 FINAL_DISCIPLINE_REMINDER = (
@@ -114,16 +121,21 @@ def _cosine_similarity(vec_a, vec_b):
 
 
 def load_memory():
-    """Loads memory, migrating any old plain-string entries to the new
-    {text, embedding} format automatically."""
+    """Loads memory, migrating any old entries missing a timestamp or embedding
+    to the current format automatically."""
     with open(MEMORY_FILE, "r") as f:
         raw = json.load(f)
 
     migrated = False
     entries = []
+    now_iso = datetime.datetime.now().isoformat()
     for item in raw:
         if isinstance(item, str):
-            entries.append({"text": item, "embedding": _get_embedding(item)})
+            entries.append({"text": item, "embedding": _get_embedding(item), "timestamp": now_iso})
+            migrated = True
+        elif "timestamp" not in item:
+            item["timestamp"] = now_iso
+            entries.append(item)
             migrated = True
         else:
             entries.append(item)
@@ -143,19 +155,34 @@ def add_memory(fact_text, memories, supersedes_text=None):
     if supersedes_text:
         memories[:] = [m for m in memories if m["text"] != supersedes_text]
     embedding = _get_embedding(fact_text)
-    memories.append({"text": fact_text, "embedding": embedding})
+    memories.append({
+        "text": fact_text,
+        "embedding": embedding,
+        "timestamp": datetime.datetime.now().isoformat()
+    })
     save_memory(memories)
 
 
+def _days_ago(timestamp_str):
+    try:
+        then = datetime.datetime.fromisoformat(timestamp_str)
+        return (datetime.datetime.now() - then).days
+    except (ValueError, TypeError):
+        return None
+
+
 def get_relevant_memories(query, memories, top_n=RELEVANT_MEMORY_TOP_N, min_sim=RELEVANT_MEMORY_MIN_SIM):
-    """Only pulls memory facts actually relevant to the current message,
-    instead of dumping everything into every prompt."""
+    """Only pulls memory facts actually relevant to the current message, and
+    annotates each with how long ago it was learned so Mimir can reason about
+    whether a time-sensitive fact ('currently traveling') is likely stale."""
     if not memories:
         return []
 
     query_embedding = _get_embedding(query)
     if query_embedding is None:
-        return [m["text"] for m in memories[-RELEVANT_MEMORY_TOP_N:]]
+        # Embedding failed -- fail SAFE (show nothing) rather than fail open
+        # (dumping recent memories unfiltered, bypassing relevance and staleness checks).
+        return []
 
     scored = []
     for m in memories:
@@ -163,10 +190,23 @@ def get_relevant_memories(query, memories, top_n=RELEVANT_MEMORY_TOP_N, min_sim=
             continue
         sim = _cosine_similarity(query_embedding, m["embedding"])
         if sim >= min_sim:
-            scored.append((sim, m["text"]))
-
+            scored.append((sim, m))
     scored.sort(key=lambda pair: pair[0], reverse=True)
-    return [text for score, text in scored[:top_n]]
+    candidates = [m for score, m in scored[:top_n]]
+
+    annotated = []
+    for m in candidates:
+        days = _days_ago(m.get("timestamp"))
+        if days is None:
+            annotated.append(m["text"])
+        elif days == 0:
+            annotated.append(f"[learned today] {m['text']}")
+        elif days == 1:
+            annotated.append(f"[learned 1 day ago] {m['text']}")
+        else:
+            annotated.append(f"[learned {days} days ago] {m['text']}")
+
+    return annotated
 
 
 def _shares_grounding(fact_text, user_input):
@@ -202,7 +242,12 @@ def extract_fact(user_input, existing_memories):
                 "- NEVER extract anything from the assistant's own apology or self-correction.\n"
                 "- Only extract something the user directly and factually stated in THIS message, about "
                 "themselves. Do not pull in or restate anything from the known facts list below unless "
-                "the current message is actually updating it.\n\n"
+                "the current message is actually updating it.\n"
+                "- If the user's message is primarily a QUESTION (asking you something, e.g. 'where am I "
+                "based?', 'what do you know about me?'), there is NOTHING to extract from it, even if it "
+                "seems to reference a known fact. Questions are requests for information, not statements "
+                "about the user. Only extract from messages where the user is actually TELLING you "
+                "something new about themselves.\n\n"
                 f"Numbered list of facts ALREADY known about the user:\n{known}\n\n"
                 "Reply with ONLY valid JSON, no other text, in exactly this format:\n"
                 '{"new_fact": "The user ..." or null, "supersedes_number": <number from the list above> or null}\n\n'
@@ -402,7 +447,9 @@ while True:
 
     conversation[0]["content"] = build_system_prompt(user_input, memories, include_tasks=False)
 
-    matches = conversation_log.search_log(user_input)
+    matches = []
+    if len(user_input.split()) >= 3:
+        matches = conversation_log.search_log(user_input)
     if matches:
         conversation.append({"role": "system", "content": conversation_log.format_matches_for_prompt(matches)})
 

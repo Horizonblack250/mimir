@@ -2,34 +2,49 @@ import datetime
 from plyer import notification
 from skills import todo
 
-def get_due_and_overdue():
-    tasks = todo.load_tasks()
-    today = datetime.date.today().isoformat()
-    relevant = [
-        t for t in tasks
-        if not t["done"] and t.get("due") and t["due"] <= today
-    ]
-    return relevant
 
 def main():
-    tasks = get_due_and_overdue()
+    tasks = todo.load_tasks()
+    now = datetime.datetime.now()
+    changed = False
 
-    if not tasks:
-        return  # nothing to say, stay silent, don't spam a notification for no reason
-
-    lines = []
     for t in tasks:
-        marker = "OVERDUE" if t["due"] < datetime.date.today().isoformat() else "DUE TODAY"
-        lines.append(f"[{marker}] {t['task']}")
+        if t["done"] or not t.get("due"):
+            continue
 
-    message = "\n".join(lines)
+        due_time = todo._parse(t["due"])
+        minutes_until = (due_time - now).total_seconds() / 60
+        print(f"DEBUG: task='{t['task']}' due={due_time} now={now} minutes_until={minutes_until:.1f} "
+              f"notified_upcoming={t.get('notified_upcoming')} notified_overdue={t.get('notified_overdue')}")
 
-    notification.notify(
-        title="Mimir — Task Check-in",
-        message=message,
-        app_name="Mimir",
-        timeout=15
-    )
+        if 0 <= minutes_until <= 15 and not t.get("notified_upcoming"):
+            print("DEBUG: firing UPCOMING notification")
+            notification.notify(
+                title="Mimir — Upcoming Task",
+                message=f"Due in {int(minutes_until)} min: {t['task']}",
+                app_name="Mimir",
+                timeout=15
+            )
+            t["notified_upcoming"] = True
+            changed = True
+
+        elif minutes_until < 0 and not t.get("notified_overdue"):
+            print("DEBUG: firing OVERDUE notification")
+            notification.notify(
+                title="Mimir — Overdue Task",
+                message=f"Overdue: {t['task']}",
+                app_name="Mimir",
+                timeout=15
+            )
+            t["notified_overdue"] = True
+            changed = True
+
+    if changed:
+        todo.save_tasks(tasks)
+        print("DEBUG: tasks.json updated")
+    else:
+        print("DEBUG: no changes made")
+
 
 if __name__ == "__main__":
     main()
