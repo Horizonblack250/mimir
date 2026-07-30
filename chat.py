@@ -227,6 +227,12 @@ def _shares_grounding(fact_text, user_input):
 
 
 def extract_fact(user_input, existing_memories):
+    # Hard rule, enforced in code: never even attempt extraction on a question.
+    # Questions have nothing factual to extract, and smaller models unreliably
+    # follow this when it's just a prompt instruction -- so we skip the call entirely.
+    if user_input.strip().endswith("?"):
+        return None, None
+
     known_texts = [m["text"] for m in existing_memories]
     known = "\n".join(f"{i+1}. {t}" for i, t in enumerate(known_texts)) if known_texts else "Nothing yet."
     extraction_prompt = [
@@ -366,7 +372,10 @@ def phrase_skill_result(user_input, raw_result, conversation):
                 "- If SUMMARY shows 0 pending tasks, say that in ONE short sentence. Do NOT list out "
                 "completed/done tasks unless the user explicitly asked to see the full list.\n"
                 "- If the user asked a yes/no question, answer briefly, don't recite everything.\n"
-                "- If something was just added/completed, briefly confirm it, nothing more."
+                "- If something was just added/completed, briefly confirm it CLEARLY as a fresh action "
+                "you just took (e.g. 'Added that — stretch today at 5:51pm.'). Do NOT phrase a fresh "
+                "addition in a way that sounds like it already existed or was previously handled — that "
+                "reads as confusing duplicate-rejection language when it isn't one."
             )
         }
     ]
