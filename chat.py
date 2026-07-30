@@ -4,6 +4,7 @@ import math
 import re
 import datetime
 import ollama
+import dateparser
 from dotenv import load_dotenv
 from openai import OpenAI
 from skills import todo
@@ -12,13 +13,29 @@ from skills import gmail_reader
 
 load_dotenv()
 
-client = OpenAI(
-    base_url="https://api.groq.com/openai/v1",
-    api_key=os.environ.get("GROQ_API_KEY")
-)
+# Two tiers, each backed by an ordered fallback chain. If a provider fails or
+# returns an empty/garbage response, Mimir automatically tries the next one --
+# this is what makes the assistant resilient to any single provider's outage
+# or quota exhaustion, rather than just breaking.
+FAST_MODEL = "fast"
+DEEP_MODEL = "deep"
 
-FAST_MODEL = "llama-3.1-8b-instant"
-DEEP_MODEL = "llama-3.3-70b-versatile"
+PROVIDER_CHAINS = {
+    "deep": [
+        {"name": "groq-70b", "base_url": "https://api.groq.com/openai/v1",
+         "api_key_env": "GROQ_API_KEY", "model": "llama-3.3-70b-versatile"},
+        {"name": "gemini-3.5-flash-lite", "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
+         "api_key_env": "GEMINI_API_KEY", "model": "gemini-3.5-flash-lite"},
+        {"name": "gemini-3.1-flash-lite", "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
+         "api_key_env": "GEMINI_API_KEY", "model": "gemini-3.1-flash-lite"},
+    ],
+    "fast": [
+        {"name": "groq-8b", "base_url": "https://api.groq.com/openai/v1",
+         "api_key_env": "GROQ_API_KEY", "model": "llama-3.1-8b-instant"},
+        {"name": "gemini-3.1-flash-lite", "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
+         "api_key_env": "GEMINI_API_KEY", "model": "gemini-3.1-flash-lite"},
+    ],
+}
 EMBED_MODEL = "nomic-embed-text"
 
 MEMORY_FILE = "memory.json"
@@ -89,8 +106,33 @@ FINAL_DISCIPLINE_REMINDER = (
 
 
 def call_model(messages, model=DEEP_MODEL):
-    response = client.chat.completions.create(model=model, messages=messages)
-    return response.choices[0].message.content
+    """Walks the fallback chain for the given tier ('deep' or 'fast'). Tries
+    each provider in order; on any error OR an empty/garbage response, moves
+    to the next one automatically. Only fails completely if every provider
+    in the chain fails."""
+    tier = model
+    chain = PROVIDER_CHAINS.get(tier, PROVIDER_CHAINS["deep"])
+
+    for i, provider in enumerate(chain):
+        api_key = os.environ.get(provider["api_key_env"])
+        if not api_key:
+            continue
+        try:
+            provider_client = OpenAI(base_url=provider["base_url"], api_key=api_key)
+            response = provider_client.chat.completions.create(
+                model=provider["model"],
+                messages=messages
+            )
+            content = response.choices[0].message.content
+            if content and content.strip():
+                if i > 0:
+                    print(f"(switched to backup model: {provider['name']})")
+                return content
+            # Empty/None response counts as a failure -- try the next provider.
+        except Exception:
+            continue
+
+    return "I'm having trouble reaching any of my language models right now. Give it a moment and try again."
 
 
 def strip_role_leak(text):
@@ -298,14 +340,15 @@ def route_message(user_input):
                 f"Right now it is {now_str} (format: YYYY-MM-DDTHH:MM, 24-hour time).\n"
                 "Classify the user's message into exactly one intent.\n\n"
                 "Reply with ONLY valid JSON, no other text, in one of these exact formats:\n"
-                '{"intent": "ADD_TASK", "task": "the task description", "due": "YYYY-MM-DDTHH:MM" or null}\n'
+                '{"intent": "ADD_TASK", "task": "the task description", "due_text": "the raw date/time phrase mentioned (e.g. \'tomorrow at 11am\', \'next monday\', \'in 3 days\'), or null if none mentioned"}\n'
                 '{"intent": "LIST_TASKS", "filter": "today" or "overdue" or "all"}\n'
                 '{"intent": "COMPLETE_TASK", "number": 1}\n'
                 '{"intent": "COMPLETE_ALL"}\n'
                 '{"intent": "CHECK_EMAIL"}\n'
                 '{"intent": "CHAT"}\n\n'
-                "Use ADD_TASK when the user wants to add a NEW task/todo/reminder. Resolve dates/times to "
-                "the next FUTURE occurrence relative to now. Use null if no date/time mentioned.\n"
+                "Use ADD_TASK when the user wants to add a NEW task/todo/reminder. "
+                "Extract the due_text EXACTLY as the user phrased it (don't compute a date yourself, just "
+                "pull out the phrase). If no date/time mentioned, use null.\n"
                 "Use LIST_TASKS when the user wants to see/check their tasks. Set filter appropriately.\n"
                 "Use COMPLETE_TASK when the user names ONE specific task number.\n"
                 "Use COMPLETE_ALL when the user wants ALL tasks marked done at once.\n"
@@ -434,7 +477,22 @@ while True:
     raw_result = None
 
     if intent == "ADD_TASK":
-        raw_result = todo.add_task(route.get("task", user_input), route.get("due"))
+        task_desc = route.get("task", user_input)
+        due_text = route.get("due_text")
+        due_iso = None
+        if due_text:
+            parsed_dt = dateparser.parse(
+                due_text,
+                settings={"RELATIVE_BASE": datetime.datetime.now(), "PREFER_DATES_FROM": "future"}
+            )
+            if parsed_dt:
+                # If no explicit time was mentioned, dateparser defaults to
+                # midnight -- default that to 9am instead, a more sensible
+                # reminder time, unless midnight was actually stated.
+                if parsed_dt.hour == 0 and parsed_dt.minute == 0 and "midnight" not in due_text.lower():
+                    parsed_dt = parsed_dt.replace(hour=9, minute=0)
+                due_iso = parsed_dt.strftime("%Y-%m-%dT%H:%M")
+        raw_result = todo.add_task(task_desc, due_iso)
     elif intent == "LIST_TASKS":
         raw_result = todo.list_tasks(route.get("filter", "all"))
     elif intent == "COMPLETE_TASK":
