@@ -14,11 +14,13 @@ def main():
 
         due_time = todo._parse(t["due"])
         minutes_until = (due_time - now).total_seconds() / 60
-        print(f"DEBUG: task='{t['task']}' due={due_time} now={now} minutes_until={minutes_until:.1f} "
-              f"notified_upcoming={t.get('notified_upcoming')} notified_overdue={t.get('notified_overdue')}")
 
-        if 0 <= minutes_until <= 15 and not t.get("notified_upcoming"):
-            print("DEBUG: firing UPCOMING notification")
+        # Use the task's own configured reminder offset (e.g. "remind me an
+        # hour before" -> 60), falling back to a default 15 min if the user
+        # never specified one for this particular task.
+        reminder_window = t.get("reminder_offset_minutes") or 15
+
+        if 0 <= minutes_until <= reminder_window and not t.get("notified_upcoming"):
             notification.notify(
                 title="Mimir — Upcoming Task",
                 message=f"Due in {int(minutes_until)} min: {t['task']}",
@@ -29,7 +31,6 @@ def main():
             changed = True
 
         elif minutes_until < 0 and not t.get("notified_overdue"):
-            print("DEBUG: firing OVERDUE notification")
             notification.notify(
                 title="Mimir — Overdue Task",
                 message=f"Overdue: {t['task']}",
@@ -41,9 +42,6 @@ def main():
 
     if changed:
         todo.save_tasks(tasks)
-        print("DEBUG: tasks.json updated")
-    else:
-        print("DEBUG: no changes made")
 
 
 if __name__ == "__main__":
