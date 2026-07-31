@@ -342,16 +342,22 @@ def route_message(user_input, recent_history=""):
                 f"{history_block}\n"
                 "Classify the user's LATEST message into exactly one intent.\n\n"
                 "Reply with ONLY valid JSON, no other text, in one of these exact formats:\n"
-                '{"intent": "ADD_TASK", "task": "the task description", "due_text": "raw date/time phrase or null", "confidence": 0.0-1.0}\n'
+                '{"intent": "ADD_TASK", "task": "the task description", "due_text": "raw date/time phrase or null", "type": "task/event/reminder/deadline/habit", "confidence": 0.0-1.0}\n'
                 '{"intent": "UPDATE_TASK", "due_text": "raw date/time phrase or null", "reminder_offset_minutes": number or null, "new_description": "text or null", "confidence": 0.0-1.0}\n'
                 '{"intent": "DELETE_TASK", "confidence": 0.0-1.0}\n'
                 '{"intent": "LIST_TASKS", "filter": "today" or "overdue" or "all"}\n'
                 '{"intent": "COMPLETE_TASK", "number": 1}\n'
                 '{"intent": "COMPLETE_ALL"}\n'
+                '{"intent": "DELETE_ALL"}\n'
                 '{"intent": "CHECK_EMAIL"}\n'
                 '{"intent": "CHAT"}\n\n'
                 "Use ADD_TASK when the user wants to add a brand NEW task/todo/reminder, unrelated to "
-                "anything just discussed. Extract due_text exactly as phrased.\n"
+                "anything just discussed. Extract due_text exactly as phrased. Classify 'type' as:\n"
+                "  - 'event': a scheduled appointment/meeting with a specific time (e.g. dentist visit)\n"
+                "  - 'deadline': something due by a specific point, often with consequences (e.g. tax filing)\n"
+                "  - 'reminder': a simple prompt to do/remember something, often without a hard deadline\n"
+                "  - 'habit': something recurring/repeated (e.g. 'exercise every morning')\n"
+                "  - 'task': a plain one-off to-do that doesn't fit the above (default)\n"
                 "Use UPDATE_TASK when the user is modifying something just discussed -- rescheduling "
                 "('actually make it Thursday'), changing a reminder ('remind me 45 min before', 'no, an "
                 "hour'), or editing description. Use the recent conversation above to understand what a "
@@ -365,9 +371,15 @@ def route_message(user_input, recent_history=""):
                 "  - LOW (below 0.4): the request references something vague or unestablished, e.g. 'remind "
                 "me before THE meeting' when no specific meeting was discussed or given a date/time, or 'move "
                 "it' with no clear prior subject. When in doubt, prefer LOW over guessing.\n"
-                "Use LIST_TASKS when the user wants to see/check their tasks. Set filter appropriately.\n"
+                "Use LIST_TASKS when the user wants to see/check their tasks -- including INDIRECT "
+                "phrasings like 'so I have nothing pending?', 'am I free today?', 'is my list empty?', "
+                "'anything left to do?'. Any question about whether tasks/reminders exist, are pending, "
+                "or are done should be LIST_TASKS, not CHAT -- CHAT has no access to real task data and "
+                "will guess. Set filter appropriately.\n"
                 "Use COMPLETE_TASK when the user names ONE specific task number.\n"
                 "Use COMPLETE_ALL when the user wants ALL tasks marked done at once.\n"
+                "Use DELETE_ALL when the user wants to CLEAR/REMOVE/DELETE all pending tasks/reminders "
+                "at once (different from COMPLETE_ALL -- this removes them, doesn't mark them done).\n"
                 "Use CHECK_EMAIL when the user asks about email, inbox, or unread messages.\n"
                 "Use CHAT for everything else, including casual conversation, questions about known facts, "
                 "and questions about the current time or date."
@@ -376,6 +388,7 @@ def route_message(user_input, recent_history=""):
         {"role": "user", "content": user_input}
     ]
     raw = call_model(routing_prompt, model=FAST_MODEL).strip()
+    print(f"DEBUG route raw: {raw}")
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
@@ -386,6 +399,7 @@ NO_OP_PREFIXES = (
     "That task already exists",
     "All tasks were already marked done",
     "You have no tasks to complete",
+    "You have no pending tasks or reminders to clear",
     "That task number doesn't exist",
     "I'm not sure which task you mean",
     "I couldn't find that task anymore",
@@ -532,7 +546,10 @@ while True:
                     if parsed_dt.hour == 0 and parsed_dt.minute == 0 and "midnight" not in due_text.lower():
                         parsed_dt = parsed_dt.replace(hour=9, minute=0)
                     due_iso = parsed_dt.strftime("%Y-%m-%dT%H:%M")
-            raw_result, new_id = todo.add_task(task_desc, due_iso)
+            task_type = route.get("type", "task")
+            if task_type not in ("task", "event", "reminder", "deadline", "habit"):
+                task_type = "task"
+            raw_result, new_id = todo.add_task(task_desc, due_iso, task_type)
             if new_id:
                 conversation_focus_id = new_id  # newly created task becomes the focus
 
@@ -575,6 +592,10 @@ while True:
 
     elif intent == "COMPLETE_ALL":
         raw_result = todo.complete_all()
+        conversation_focus_id = None
+
+    elif intent == "DELETE_ALL":
+        raw_result = todo.delete_all_pending()
         conversation_focus_id = None
 
     elif intent == "CHECK_EMAIL":

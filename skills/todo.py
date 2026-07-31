@@ -10,7 +10,18 @@ def load_tasks():
     if not os.path.exists(TASKS_FILE):
         return []
     with open(TASKS_FILE, "r") as f:
-        tasks = json.load(f)
+        content = f.read().strip()
+
+    if not content:
+        # File exists but is empty -- fail safe instead of crashing.
+        return []
+
+    try:
+        tasks = json.loads(content)
+    except json.JSONDecodeError:
+        print("WARNING: tasks.json is corrupted or unreadable -- starting with an empty task list. "
+              "Your old file has NOT been overwritten yet; check it manually if you need to recover data.")
+        return []
 
     migrated = False
     for t in tasks:
@@ -19,6 +30,9 @@ def load_tasks():
             migrated = True
         if "reminder_offset_minutes" not in t:
             t["reminder_offset_minutes"] = None
+            migrated = True
+        if "type" not in t:
+            t["type"] = "task"
             migrated = True
 
     if migrated:
@@ -43,7 +57,7 @@ def _parse(due_str):
         return datetime.datetime.fromisoformat(due_str + "T23:59")
 
 
-def add_task(description, due=None):
+def add_task(description, due=None, task_type="task"):
     tasks = load_tasks()
     new_norm = _normalize(description)
 
@@ -56,6 +70,7 @@ def add_task(description, due=None):
     tasks.append({
         "id": task_id,
         "task": description,
+        "type": task_type,
         "done": False,
         "due": due,
         "reminder_offset_minutes": None,
@@ -77,8 +92,9 @@ def get_task_by_id(task_id):
 
 
 def update_task(task_id, due=None, reminder_offset_minutes=None, new_description=None):
-    """Modifies an existing task in place -- this is what Conversation Focus
-    resolves into, instead of accidentally creating a duplicate task."""
+    """Modifies an existing task in place. Only counts something as an actual
+    change if the new value genuinely differs from the current one -- avoids
+    reporting a 'change' when nothing really moved."""
     tasks = load_tasks()
     target = None
     for t in tasks:
@@ -90,21 +106,21 @@ def update_task(task_id, due=None, reminder_offset_minutes=None, new_description
         return "I couldn't find that task anymore -- it may have been completed or removed."
 
     changes = []
-    if due is not None:
+    if due is not None and due != target.get("due"):
         target["due"] = due
         target["notified_upcoming"] = False
         target["notified_overdue"] = False
         changes.append(f"due date to {due}")
-    if reminder_offset_minutes is not None:
+    if reminder_offset_minutes is not None and reminder_offset_minutes != target.get("reminder_offset_minutes"):
         target["reminder_offset_minutes"] = reminder_offset_minutes
         target["notified_upcoming"] = False
         changes.append(f"reminder to {reminder_offset_minutes} minutes before")
-    if new_description is not None:
+    if new_description is not None and new_description != target.get("task"):
         target["task"] = new_description
         changes.append(f"description to '{new_description}'")
 
     if not changes:
-        return "Nothing to update -- no changes were specified."
+        return "That's already how it's set -- no change needed."
 
     save_tasks(tasks)
     return f"Updated '{target['task']}': " + ", ".join(changes) + "."
@@ -154,9 +170,10 @@ def list_tasks(filter_mode="all"):
     lines = [f"SUMMARY: {pending_count} pending, {done_count} done (out of {len(numbered)} shown below)."]
     for i, t in numbered:
         status = "DONE" if t["done"] else "PENDING"
+        type_tag = f"[{t.get('type', 'task').upper()}] "
         due_str = f" | due: {t['due']}" if t.get("due") else ""
         reminder_str = f" | reminds {t['reminder_offset_minutes']}min before" if t.get("reminder_offset_minutes") else ""
-        lines.append(f"{i}. [{status}] {t['task']}{due_str}{reminder_str}  (id: {t['id']})")
+        lines.append(f"{i}. [{status}] {type_tag}{t['task']}{due_str}{reminder_str}  (id: {t['id']})")
     return "\n".join(lines)
 
 
@@ -180,3 +197,15 @@ def complete_all():
     if count == 0:
         return "All tasks were already marked done. Nothing changed."
     return f"Marked {count} task(s) as done. All tasks are now complete."
+
+
+def delete_all_pending():
+    """Removes every task/reminder that's still pending, leaving completed
+    ones untouched."""
+    tasks = load_tasks()
+    pending = [t for t in tasks if not t["done"]]
+    if not pending:
+        return "You have no pending tasks or reminders to clear."
+    remaining = [t for t in tasks if t["done"]]
+    save_tasks(remaining)
+    return f"Cleared {len(pending)} pending task(s)/reminder(s)."
