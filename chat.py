@@ -342,7 +342,7 @@ def route_message(user_input, recent_history=""):
                 f"{history_block}\n"
                 "Classify the user's LATEST message into exactly one intent.\n\n"
                 "Reply with ONLY valid JSON, no other text, in one of these exact formats:\n"
-                '{"intent": "ADD_TASK", "task": "the task description", "due_text": "raw date/time phrase or null", "type": "task/event/reminder/deadline/habit", "confidence": 0.0-1.0}\n'
+                '{"intent": "ADD_TASK", "task": "the task description", "due_text": "raw date/time phrase or null", "type": "task/event/reminder/deadline/habit", "reminder_offset_minutes": number or null, "confidence": 0.0-1.0}\n'
                 '{"intent": "UPDATE_TASK", "due_text": "raw date/time phrase or null", "reminder_offset_minutes": number or null, "new_description": "text or null", "confidence": 0.0-1.0}\n'
                 '{"intent": "DELETE_TASK", "confidence": 0.0-1.0}\n'
                 '{"intent": "LIST_TASKS", "filter": "today" or "overdue" or "all"}\n'
@@ -352,7 +352,12 @@ def route_message(user_input, recent_history=""):
                 '{"intent": "CHECK_EMAIL"}\n'
                 '{"intent": "CHAT"}\n\n'
                 "Use ADD_TASK when the user wants to add a brand NEW task/todo/reminder, unrelated to "
-                "anything just discussed. Extract due_text exactly as phrased. Classify 'type' as:\n"
+                "anything just discussed. Extract due_text exactly as phrased -- even if it's vague "
+                "(e.g. 'next week', 'sometime tomorrow'), still extract it rather than returning null. "
+                "Only use null if truly NO date/time reference was made at all. "
+                "If the user ALSO mentions a reminder in the same message (e.g. 'remind me 30 mins "
+                "before'), set reminder_offset_minutes to that number of minutes; otherwise null. "
+                "Classify 'type' as:\n"
                 "  - 'event': a scheduled appointment/meeting with a specific time (e.g. dentist visit)\n"
                 "  - 'deadline': something due by a specific point, often with consequences (e.g. tax filing)\n"
                 "  - 'reminder': a simple prompt to do/remember something, often without a hard deadline\n"
@@ -388,7 +393,6 @@ def route_message(user_input, recent_history=""):
         {"role": "user", "content": user_input}
     ]
     raw = call_model(routing_prompt, model=FAST_MODEL).strip()
-    print(f"DEBUG route raw: {raw}")
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
@@ -448,6 +452,9 @@ def phrase_skill_result(user_input, raw_result, conversation):
                 "- If SUMMARY shows 0 pending tasks, say that in ONE short sentence. Do NOT list out "
                 "completed/done tasks unless the user explicitly asked to see the full list.\n"
                 "- If the user asked a yes/no question, answer briefly, don't recite everything.\n"
+                "- When converting a 24-hour time (e.g. 16:00) to a natural form (4pm), just state it "
+                "plainly and confidently. Do not hedge, second-guess, or narrate the conversion out loud "
+                "(avoid things like 'isn't accurate, it's actually...') -- just say '4pm' cleanly.\n"
                 "- If something was just added/completed, briefly confirm it CLEARLY as a fresh action "
                 "you just took (e.g. 'Added that — stretch today at 5:51pm.'). Do NOT phrase a fresh "
                 "addition in a way that sounds like it already existed or was previously handled — that "
@@ -549,7 +556,7 @@ while True:
             task_type = route.get("type", "task")
             if task_type not in ("task", "event", "reminder", "deadline", "habit"):
                 task_type = "task"
-            raw_result, new_id = todo.add_task(task_desc, due_iso, task_type)
+            raw_result, new_id = todo.add_task(task_desc, due_iso, task_type, route.get("reminder_offset_minutes"))
             if new_id:
                 conversation_focus_id = new_id  # newly created task becomes the focus
 

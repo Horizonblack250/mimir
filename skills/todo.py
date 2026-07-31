@@ -57,7 +57,7 @@ def _parse(due_str):
         return datetime.datetime.fromisoformat(due_str + "T23:59")
 
 
-def add_task(description, due=None, task_type="task"):
+def add_task(description, due=None, task_type="task", reminder_offset_minutes=None):
     tasks = load_tasks()
     new_norm = _normalize(description)
 
@@ -73,7 +73,7 @@ def add_task(description, due=None, task_type="task"):
         "type": task_type,
         "done": False,
         "due": due,
-        "reminder_offset_minutes": None,
+        "reminder_offset_minutes": reminder_offset_minutes,
         "notified_upcoming": False,
         "notified_overdue": False
     })
