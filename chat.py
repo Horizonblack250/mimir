@@ -342,9 +342,9 @@ def route_message(user_input, recent_history=""):
                 f"{history_block}\n"
                 "Classify the user's LATEST message into exactly one intent.\n\n"
                 "Reply with ONLY valid JSON, no other text, in one of these exact formats:\n"
-                '{"intent": "ADD_TASK", "task": "the task description", "due_text": "raw date/time phrase or null"}\n'
-                '{"intent": "UPDATE_TASK", "due_text": "raw date/time phrase or null", "reminder_offset_minutes": number or null, "new_description": "text or null"}\n'
-                '{"intent": "DELETE_TASK"}\n'
+                '{"intent": "ADD_TASK", "task": "the task description", "due_text": "raw date/time phrase or null", "confidence": 0.0-1.0}\n'
+                '{"intent": "UPDATE_TASK", "due_text": "raw date/time phrase or null", "reminder_offset_minutes": number or null, "new_description": "text or null", "confidence": 0.0-1.0}\n'
+                '{"intent": "DELETE_TASK", "confidence": 0.0-1.0}\n'
                 '{"intent": "LIST_TASKS", "filter": "today" or "overdue" or "all"}\n'
                 '{"intent": "COMPLETE_TASK", "number": 1}\n'
                 '{"intent": "COMPLETE_ALL"}\n'
@@ -358,6 +358,13 @@ def route_message(user_input, recent_history=""):
                 "short follow-up like 'no, an hour' actually means (e.g. if the last topic was a reminder "
                 "offset, interpret 'an hour' as reminder_offset_minutes=60, not a new due date).\n"
                 "Use DELETE_TASK when the user wants to remove/cancel something just discussed.\n"
+                "For ADD_TASK, UPDATE_TASK, and DELETE_TASK, include a 'confidence' score (0.0 to 1.0) "
+                "reflecting how CLEAR the reference/request actually is:\n"
+                "  - HIGH (0.8-1.0): the reference is unambiguous, e.g. clearly continuing something just "
+                "discussed, or a fully self-contained new task with clear details.\n"
+                "  - LOW (below 0.4): the request references something vague or unestablished, e.g. 'remind "
+                "me before THE meeting' when no specific meeting was discussed or given a date/time, or 'move "
+                "it' with no clear prior subject. When in doubt, prefer LOW over guessing.\n"
                 "Use LIST_TASKS when the user wants to see/check their tasks. Set filter appropriately.\n"
                 "Use COMPLETE_TASK when the user names ONE specific task number.\n"
                 "Use COMPLETE_ALL when the user wants ALL tasks marked done at once.\n"
@@ -382,7 +389,7 @@ NO_OP_PREFIXES = (
     "That task number doesn't exist",
     "I'm not sure which task you mean",
     "I couldn't find that task anymore",
-    "Nothing to update",
+    "That's already how it's set",
 )
 
 
@@ -430,7 +437,10 @@ def phrase_skill_result(user_input, raw_result, conversation):
                 "- If something was just added/completed, briefly confirm it CLEARLY as a fresh action "
                 "you just took (e.g. 'Added that — stretch today at 5:51pm.'). Do NOT phrase a fresh "
                 "addition in a way that sounds like it already existed or was previously handled — that "
-                "reads as confusing duplicate-rejection language when it isn't one."
+                "reads as confusing duplicate-rejection language when it isn't one.\n"
+                "- Vary your sentence structure and wording naturally each time. Avoid falling into a "
+                "fixed template for confirmations -- sound like a person who happens to be good at this, "
+                "not a script running the same phrase pattern every time."
             )
         }
     ]
@@ -496,26 +506,39 @@ while True:
 
     raw_result = None
 
+    confidence = route.get("confidence", 1.0)
+    if not isinstance(confidence, (int, float)):
+        confidence = 1.0
+    LOW_CONFIDENCE_THRESHOLD = 0.4
+
     if intent == "ADD_TASK":
-        task_desc = route.get("task", user_input)
-        due_text = route.get("due_text")
-        due_iso = None
-        if due_text:
-            parsed_dt = dateparser.parse(
-                due_text,
-                settings={"RELATIVE_BASE": datetime.datetime.now(), "PREFER_DATES_FROM": "future"}
+        if confidence < LOW_CONFIDENCE_THRESHOLD:
+            raw_result = (
+                "CLARIFICATION_NEEDED: The user's request is ambiguous or references something not "
+                "clearly established (e.g. 'the meeting' with no specific meeting on record). Ask ONE "
+                "sharp, specific clarifying question to resolve it, in your own voice. Do not create "
+                "any task yet."
             )
-            if parsed_dt:
-                if parsed_dt.hour == 0 and parsed_dt.minute == 0 and "midnight" not in due_text.lower():
-                    parsed_dt = parsed_dt.replace(hour=9, minute=0)
-                due_iso = parsed_dt.strftime("%Y-%m-%dT%H:%M")
-        raw_result, new_id = todo.add_task(task_desc, due_iso)
-        if new_id:
-            conversation_focus_id = new_id  # newly created task becomes the focus
+        else:
+            task_desc = route.get("task", user_input)
+            due_text = route.get("due_text")
+            due_iso = None
+            if due_text:
+                parsed_dt = dateparser.parse(
+                    due_text,
+                    settings={"RELATIVE_BASE": datetime.datetime.now(), "PREFER_DATES_FROM": "future"}
+                )
+                if parsed_dt:
+                    if parsed_dt.hour == 0 and parsed_dt.minute == 0 and "midnight" not in due_text.lower():
+                        parsed_dt = parsed_dt.replace(hour=9, minute=0)
+                    due_iso = parsed_dt.strftime("%Y-%m-%dT%H:%M")
+            raw_result, new_id = todo.add_task(task_desc, due_iso)
+            if new_id:
+                conversation_focus_id = new_id  # newly created task becomes the focus
 
     elif intent == "UPDATE_TASK":
-        if conversation_focus_id is None:
-            raw_result = "I'm not sure which task you mean -- we haven't talked about one yet in this conversation. Could you tell me which one?"
+        if conversation_focus_id is None or confidence < LOW_CONFIDENCE_THRESHOLD:
+            raw_result = "I'm not sure which task you mean -- could you tell me which one?"
         else:
             due_text = route.get("due_text")
             due_iso = None
@@ -536,8 +559,8 @@ while True:
             )
 
     elif intent == "DELETE_TASK":
-        if conversation_focus_id is None:
-            raw_result = "I'm not sure which task you mean -- we haven't talked about one yet in this conversation. Could you tell me which one?"
+        if conversation_focus_id is None or confidence < LOW_CONFIDENCE_THRESHOLD:
+            raw_result = "I'm not sure which task you mean -- could you tell me which one?"
         else:
             raw_result = todo.delete_task(conversation_focus_id)
             conversation_focus_id = None  # the focused task no longer exists

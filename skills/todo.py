@@ -50,7 +50,7 @@ def add_task(description, due=None):
     for t in tasks:
         if _normalize(t["task"]) == new_norm and not t["done"]:
             due_str = f" (due: {t['due']})" if t.get("due") else ""
-            return f"That task already exists and is still pending: {t['task']}{due_str}. Not adding a duplicate.", None
+            return f"That task already exists and is still pending: {t['task']}{due_str}. Not adding a duplicate.", t["id"]
 
     task_id = uuid.uuid4().hex[:8]
     tasks.append({
