@@ -7,7 +7,6 @@ TASKS_FILE = os.path.join(os.path.dirname(__file__), "..", "tasks.json")
 
 
 def load_tasks():
-    """Loads tasks, migrating any old entries missing a stable ID."""
     if not os.path.exists(TASKS_FILE):
         return []
     with open(TASKS_FILE, "r") as f:
@@ -17,6 +16,9 @@ def load_tasks():
     for t in tasks:
         if "id" not in t:
             t["id"] = uuid.uuid4().hex[:8]
+            migrated = True
+        if "reminder_offset_minutes" not in t:
+            t["reminder_offset_minutes"] = None
             migrated = True
 
     if migrated:
@@ -42,10 +44,6 @@ def _parse(due_str):
 
 
 def add_task(description, due=None):
-    """Creates a new task with a permanent, stable ID -- this ID never changes,
-    regardless of list position, filtering, or completion status. Everything
-    built on top of this (Conversation Focus, UPDATE/DELETE) will reference
-    tasks by this ID, not by their position in a list."""
     tasks = load_tasks()
     new_norm = _normalize(description)
 
@@ -60,6 +58,7 @@ def add_task(description, due=None):
         "task": description,
         "done": False,
         "due": due,
+        "reminder_offset_minutes": None,
         "notified_upcoming": False,
         "notified_overdue": False
     })
@@ -75,6 +74,56 @@ def get_task_by_id(task_id):
         if t["id"] == task_id:
             return t
     return None
+
+
+def update_task(task_id, due=None, reminder_offset_minutes=None, new_description=None):
+    """Modifies an existing task in place -- this is what Conversation Focus
+    resolves into, instead of accidentally creating a duplicate task."""
+    tasks = load_tasks()
+    target = None
+    for t in tasks:
+        if t["id"] == task_id:
+            target = t
+            break
+
+    if target is None:
+        return "I couldn't find that task anymore -- it may have been completed or removed."
+
+    changes = []
+    if due is not None:
+        target["due"] = due
+        target["notified_upcoming"] = False
+        target["notified_overdue"] = False
+        changes.append(f"due date to {due}")
+    if reminder_offset_minutes is not None:
+        target["reminder_offset_minutes"] = reminder_offset_minutes
+        target["notified_upcoming"] = False
+        changes.append(f"reminder to {reminder_offset_minutes} minutes before")
+    if new_description is not None:
+        target["task"] = new_description
+        changes.append(f"description to '{new_description}'")
+
+    if not changes:
+        return "Nothing to update -- no changes were specified."
+
+    save_tasks(tasks)
+    return f"Updated '{target['task']}': " + ", ".join(changes) + "."
+
+
+def delete_task(task_id):
+    tasks = load_tasks()
+    target = None
+    for t in tasks:
+        if t["id"] == task_id:
+            target = t
+            break
+
+    if target is None:
+        return "I couldn't find that task anymore -- it may already be gone."
+
+    tasks = [t for t in tasks if t["id"] != task_id]
+    save_tasks(tasks)
+    return f"Removed task: {target['task']}."
 
 
 def list_tasks(filter_mode="all"):
@@ -106,17 +155,18 @@ def list_tasks(filter_mode="all"):
     for i, t in numbered:
         status = "DONE" if t["done"] else "PENDING"
         due_str = f" | due: {t['due']}" if t.get("due") else ""
-        lines.append(f"{i}. [{status}] {t['task']}{due_str}  (id: {t['id']})")
+        reminder_str = f" | reminds {t['reminder_offset_minutes']}min before" if t.get("reminder_offset_minutes") else ""
+        lines.append(f"{i}. [{status}] {t['task']}{due_str}{reminder_str}  (id: {t['id']})")
     return "\n".join(lines)
 
 
 def complete_task(index):
     tasks = load_tasks()
     if index < 1 or index > len(tasks):
-        return "That task number doesn't exist."
+        return "That task number doesn't exist.", None
     tasks[index - 1]["done"] = True
     save_tasks(tasks)
-    return f"Marked task {index} as done."
+    return f"Marked task {index} as done.", tasks[index - 1]["id"]
 
 
 def complete_all():

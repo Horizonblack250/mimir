@@ -330,25 +330,34 @@ def extract_fact(user_input, existing_memories):
     return new_fact, supersedes_text
 
 
-def route_message(user_input):
+def route_message(user_input, recent_history=""):
     now_str = datetime.datetime.now().strftime("%Y-%m-%dT%H:%M")
+    history_block = f"\nRecent conversation for context (most recent last):\n{recent_history}\n" if recent_history else ""
     routing_prompt = [
         {
             "role": "system",
             "content": (
                 "You are a router for an assistant with a todo-list skill. "
                 f"Right now it is {now_str} (format: YYYY-MM-DDTHH:MM, 24-hour time).\n"
-                "Classify the user's message into exactly one intent.\n\n"
+                f"{history_block}\n"
+                "Classify the user's LATEST message into exactly one intent.\n\n"
                 "Reply with ONLY valid JSON, no other text, in one of these exact formats:\n"
-                '{"intent": "ADD_TASK", "task": "the task description", "due_text": "the raw date/time phrase mentioned (e.g. \'tomorrow at 11am\', \'next monday\', \'in 3 days\'), or null if none mentioned"}\n'
+                '{"intent": "ADD_TASK", "task": "the task description", "due_text": "raw date/time phrase or null"}\n'
+                '{"intent": "UPDATE_TASK", "due_text": "raw date/time phrase or null", "reminder_offset_minutes": number or null, "new_description": "text or null"}\n'
+                '{"intent": "DELETE_TASK"}\n'
                 '{"intent": "LIST_TASKS", "filter": "today" or "overdue" or "all"}\n'
                 '{"intent": "COMPLETE_TASK", "number": 1}\n'
                 '{"intent": "COMPLETE_ALL"}\n'
                 '{"intent": "CHECK_EMAIL"}\n'
                 '{"intent": "CHAT"}\n\n'
-                "Use ADD_TASK when the user wants to add a NEW task/todo/reminder. "
-                "Extract the due_text EXACTLY as the user phrased it (don't compute a date yourself, just "
-                "pull out the phrase). If no date/time mentioned, use null.\n"
+                "Use ADD_TASK when the user wants to add a brand NEW task/todo/reminder, unrelated to "
+                "anything just discussed. Extract due_text exactly as phrased.\n"
+                "Use UPDATE_TASK when the user is modifying something just discussed -- rescheduling "
+                "('actually make it Thursday'), changing a reminder ('remind me 45 min before', 'no, an "
+                "hour'), or editing description. Use the recent conversation above to understand what a "
+                "short follow-up like 'no, an hour' actually means (e.g. if the last topic was a reminder "
+                "offset, interpret 'an hour' as reminder_offset_minutes=60, not a new due date).\n"
+                "Use DELETE_TASK when the user wants to remove/cancel something just discussed.\n"
                 "Use LIST_TASKS when the user wants to see/check their tasks. Set filter appropriately.\n"
                 "Use COMPLETE_TASK when the user names ONE specific task number.\n"
                 "Use COMPLETE_ALL when the user wants ALL tasks marked done at once.\n"
@@ -371,6 +380,9 @@ NO_OP_PREFIXES = (
     "All tasks were already marked done",
     "You have no tasks to complete",
     "That task number doesn't exist",
+    "I'm not sure which task you mean",
+    "I couldn't find that task anymore",
+    "Nothing to update",
 )
 
 
@@ -457,6 +469,7 @@ def trim_conversation(conversation):
 
 
 memories = load_memory()
+conversation_focus_id = None  # Phase 2: the task most recently created/discussed
 
 conversation = [
     {"role": "system", "content": build_system_prompt("hello", memories, include_tasks=False)}
@@ -471,7 +484,14 @@ while True:
         print("Mimir: Goodbye for now.")
         break
 
-    route = route_message(user_input)
+    # Give the router the last couple of exchanges so it can resolve short
+    # follow-ups like "no, an hour" against what was actually being discussed.
+    recent_turns = conversation[-4:] if len(conversation) > 1 else []
+    recent_history_text = "\n".join(
+        f"{m['role']}: {m['content']}" for m in recent_turns if m["role"] in ("user", "assistant")
+    )
+
+    route = route_message(user_input, recent_history_text)
     intent = route.get("intent", "CHAT")
 
     raw_result = None
@@ -486,19 +506,54 @@ while True:
                 settings={"RELATIVE_BASE": datetime.datetime.now(), "PREFER_DATES_FROM": "future"}
             )
             if parsed_dt:
-                # If no explicit time was mentioned, dateparser defaults to
-                # midnight -- default that to 9am instead, a more sensible
-                # reminder time, unless midnight was actually stated.
                 if parsed_dt.hour == 0 and parsed_dt.minute == 0 and "midnight" not in due_text.lower():
                     parsed_dt = parsed_dt.replace(hour=9, minute=0)
                 due_iso = parsed_dt.strftime("%Y-%m-%dT%H:%M")
-        raw_result = todo.add_task(task_desc, due_iso)
+        raw_result, new_id = todo.add_task(task_desc, due_iso)
+        if new_id:
+            conversation_focus_id = new_id  # newly created task becomes the focus
+
+    elif intent == "UPDATE_TASK":
+        if conversation_focus_id is None:
+            raw_result = "I'm not sure which task you mean -- we haven't talked about one yet in this conversation. Could you tell me which one?"
+        else:
+            due_text = route.get("due_text")
+            due_iso = None
+            if due_text:
+                parsed_dt = dateparser.parse(
+                    due_text,
+                    settings={"RELATIVE_BASE": datetime.datetime.now(), "PREFER_DATES_FROM": "future"}
+                )
+                if parsed_dt:
+                    if parsed_dt.hour == 0 and parsed_dt.minute == 0 and "midnight" not in due_text.lower():
+                        parsed_dt = parsed_dt.replace(hour=9, minute=0)
+                    due_iso = parsed_dt.strftime("%Y-%m-%dT%H:%M")
+            raw_result = todo.update_task(
+                conversation_focus_id,
+                due=due_iso,
+                reminder_offset_minutes=route.get("reminder_offset_minutes"),
+                new_description=route.get("new_description")
+            )
+
+    elif intent == "DELETE_TASK":
+        if conversation_focus_id is None:
+            raw_result = "I'm not sure which task you mean -- we haven't talked about one yet in this conversation. Could you tell me which one?"
+        else:
+            raw_result = todo.delete_task(conversation_focus_id)
+            conversation_focus_id = None  # the focused task no longer exists
+
     elif intent == "LIST_TASKS":
         raw_result = todo.list_tasks(route.get("filter", "all"))
+
     elif intent == "COMPLETE_TASK":
-        raw_result = todo.complete_task(route.get("number", 0))
+        raw_result, completed_id = todo.complete_task(route.get("number", 0))
+        if completed_id:
+            conversation_focus_id = completed_id
+
     elif intent == "COMPLETE_ALL":
         raw_result = todo.complete_all()
+        conversation_focus_id = None
+
     elif intent == "CHECK_EMAIL":
         raw_result = filter_job_related_emails(gmail_reader.get_unread_summary())
 
