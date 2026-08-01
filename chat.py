@@ -89,13 +89,12 @@ MIMIR_IDENTITY = (
     "IMPORTANT CONTINUITY RULE: You have an ongoing relationship with this user across many past sessions. "
     "Do NOT greet them as if meeting for the first time. If you truly know nothing relevant, it's fine to "
     "say so plainly, but never deny knowing something explicitly listed in your context.\n\n"
-    "TIME-AWARENESS ABOUT YOUR OWN MEMORY: each fact below is tagged with how long ago you learned it. "
-    "Facts describing a TEMPORARY or CURRENT state — traveling somewhere, being at a specific place "
-    "'right now', a short-term mood, an in-progress errand — should be treated as likely OUTDATED if "
-    "learned more than 2-3 days ago, unless the user just reaffirmed it in this conversation. Do not state "
-    "an old temporary fact as if it's still true; at most, reference it tentatively ('last I noted...') "
-    "and let the user correct you if it's changed. Durable facts (name, background, relationships, "
-    "long-term goals) do not expire this way regardless of age."
+    "MEMORY CATEGORIES: each fact below is tagged with its category and how long ago it was learned. "
+    "Facts tagged [TEMPORARY] describe a short-lived current state (location, activity, mood, an "
+    "in-progress errand) and should be treated as likely OUTDATED if learned more than 2-3 days ago, "
+    "unless the user just reaffirmed it in this conversation -- reference them tentatively ('last I "
+    "noted...') rather than stating them as certainly still true. Facts tagged [FACT], [PREFERENCE], "
+    "or [GOAL] are durable and do NOT expire with age, regardless of how long ago they were learned."
 )
 
 FINAL_DISCIPLINE_REMINDER = (
@@ -173,14 +172,16 @@ def load_memory():
     now_iso = datetime.datetime.now().isoformat()
     for item in raw:
         if isinstance(item, str):
-            entries.append({"text": item, "embedding": _get_embedding(item), "timestamp": now_iso})
+            entries.append({"text": item, "embedding": _get_embedding(item), "timestamp": now_iso, "category": "fact"})
             migrated = True
-        elif "timestamp" not in item:
+            continue
+        if "timestamp" not in item:
             item["timestamp"] = now_iso
-            entries.append(item)
             migrated = True
-        else:
-            entries.append(item)
+        if "category" not in item:
+            item["category"] = "fact"
+            migrated = True
+        entries.append(item)
 
     if migrated:
         save_memory(entries)
@@ -193,14 +194,15 @@ def save_memory(memories):
         json.dump(memories, f, indent=2)
 
 
-def add_memory(fact_text, memories, supersedes_text=None):
+def add_memory(fact_text, memories, supersedes_text=None, category="fact"):
     if supersedes_text:
         memories[:] = [m for m in memories if m["text"] != supersedes_text]
     embedding = _get_embedding(fact_text)
     memories.append({
         "text": fact_text,
         "embedding": embedding,
-        "timestamp": datetime.datetime.now().isoformat()
+        "timestamp": datetime.datetime.now().isoformat(),
+        "category": category
     })
     save_memory(memories)
 
@@ -238,15 +240,17 @@ def get_relevant_memories(query, memories, top_n=RELEVANT_MEMORY_TOP_N, min_sim=
 
     annotated = []
     for m in candidates:
+        category = m.get("category", "fact").upper()
         days = _days_ago(m.get("timestamp"))
         if days is None:
-            annotated.append(m["text"])
+            age_str = ""
         elif days == 0:
-            annotated.append(f"[learned today] {m['text']}")
+            age_str = ", learned today"
         elif days == 1:
-            annotated.append(f"[learned 1 day ago] {m['text']}")
+            age_str = ", learned 1 day ago"
         else:
-            annotated.append(f"[learned {days} days ago] {m['text']}")
+            age_str = f", learned {days} days ago"
+        annotated.append(f"[{category}{age_str}] {m['text']}")
 
     return annotated
 
@@ -273,7 +277,7 @@ def extract_fact(user_input, existing_memories):
     # Questions have nothing factual to extract, and smaller models unreliably
     # follow this when it's just a prompt instruction -- so we skip the call entirely.
     if user_input.strip().endswith("?"):
-        return None, None
+        return None, None, None
 
     known_texts = [m["text"] for m in existing_memories]
     known = "\n".join(f"{i+1}. {t}" for i, t in enumerate(known_texts)) if known_texts else "Nothing yet."
@@ -281,9 +285,9 @@ def extract_fact(user_input, existing_memories):
         {
             "role": "system",
             "content": (
-                "You extract long-term memorable facts about a user from a single message, and detect "
-                "when a new fact UPDATES/REPLACES an old one (e.g. current location, current activity, "
-                "current job status changing) versus being a genuinely separate new fact.\n\n"
+                "You extract long-term memorable facts about a user from a single message, categorize "
+                "them, and detect when a new fact UPDATES/REPLACES an old one (e.g. current location "
+                "changing) versus being a genuinely separate new fact.\n\n"
                 "STRICT RULES:\n"
                 "- NEVER extract personality judgments or behavioral inferences.\n"
                 "- NEVER extract facts about who or what 'Mimir' is.\n"
@@ -291,17 +295,23 @@ def extract_fact(user_input, existing_memories):
                 "- Only extract something the user directly and factually stated in THIS message, about "
                 "themselves. Do not pull in or restate anything from the known facts list below unless "
                 "the current message is actually updating it.\n"
-                "- If the user's message is primarily a QUESTION (asking you something, e.g. 'where am I "
-                "based?', 'what do you know about me?'), there is NOTHING to extract from it, even if it "
-                "seems to reference a known fact. Questions are requests for information, not statements "
-                "about the user. Only extract from messages where the user is actually TELLING you "
-                "something new about themselves.\n\n"
+                "- If the user's message is primarily a QUESTION, there is NOTHING to extract from it.\n\n"
                 f"Numbered list of facts ALREADY known about the user:\n{known}\n\n"
                 "Reply with ONLY valid JSON, no other text, in exactly this format:\n"
-                '{"new_fact": "The user ..." or null, "supersedes_number": <number from the list above> or null}\n\n'
+                '{"new_fact": "The user ..." or null, "supersedes_number": <number> or null, '
+                '"category": "fact" or "preference" or "goal" or "temporary"}\n\n'
                 "Set new_fact to null if this message contains nothing new worth remembering.\n"
                 "Set supersedes_number to the number of an existing fact ONLY if the new fact makes that "
-                "old one outdated/no-longer-true (e.g. old location replaced by new location). Otherwise null."
+                "old one outdated. Otherwise null.\n"
+                "Categorize as:\n"
+                "  - 'fact': stable, durable info -- name, background, birthplace, relationships, "
+                "long-term circumstances. Does not expire.\n"
+                "  - 'preference': a like/dislike/style/habit preference (e.g. 'prefers dark mode', "
+                "'doesn't like early meetings'). Does not expire, but can be superseded if contradicted.\n"
+                "  - 'goal': something the user is working toward or wants (e.g. 'wants to cut sugar', "
+                "'is job hunting'). Durable until the user indicates it's done/abandoned.\n"
+                "  - 'temporary': a short-lived current state -- current location, current activity, "
+                "current mood, an in-progress errand. Naturally goes stale after a few days."
             )
         },
         {"role": "user", "content": user_input}
@@ -311,23 +321,26 @@ def extract_fact(user_input, existing_memories):
     try:
         result = json.loads(raw)
     except json.JSONDecodeError:
-        return None, None
+        return None, None, None
 
     new_fact = result.get("new_fact")
     supersedes_number = result.get("supersedes_number")
+    category = result.get("category")
+    if category not in ("fact", "preference", "goal", "temporary"):
+        category = "fact"  # safe default if the model returns something unexpected
 
     if not new_fact or not isinstance(new_fact, str):
-        return None, None
+        return None, None, None
     if not new_fact.lower().startswith("the user"):
-        return None, None
+        return None, None, None
     if not _shares_grounding(new_fact, user_input):
-        return None, None
+        return None, None, None
 
     supersedes_text = None
     if isinstance(supersedes_number, int) and 1 <= supersedes_number <= len(known_texts):
         supersedes_text = known_texts[supersedes_number - 1]
 
-    return new_fact, supersedes_text
+    return new_fact, supersedes_text, category
 
 
 def route_message(user_input, recent_history=""):
@@ -636,10 +649,10 @@ while True:
     conversation_log.log_exchange(user_input, reply)
     trim_conversation(conversation)
 
-    fact, supersedes = extract_fact(user_input, memories)
+    fact, supersedes, category = extract_fact(user_input, memories)
     if fact:
-        add_memory(fact, memories, supersedes_text=supersedes)
+        add_memory(fact, memories, supersedes_text=supersedes, category=category)
         if supersedes:
-            print(f"(updated memory: {fact})")
+            print(f"(updated memory [{category}]: {fact})")
         else:
-            print(f"(remembered: {fact})")
+            print(f"(remembered [{category}]: {fact})")
