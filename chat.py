@@ -363,6 +363,8 @@ def route_message(user_input, recent_history=""):
                 '{"intent": "COMPLETE_ALL"}\n'
                 '{"intent": "DELETE_ALL"}\n'
                 '{"intent": "CHECK_EMAIL"}\n'
+                '{"intent": "PLAN_REQUEST"}\n'
+                '{"intent": "CONFIRM_PLAN"}\n'
                 '{"intent": "CHAT"}\n\n'
                 "Use ADD_TASK when the user wants to add a brand NEW task/todo/reminder, unrelated to "
                 "anything just discussed. Extract due_text exactly as phrased -- even if it's vague "
@@ -399,6 +401,13 @@ def route_message(user_input, recent_history=""):
                 "Use DELETE_ALL when the user wants to CLEAR/REMOVE/DELETE all pending tasks/reminders "
                 "at once (different from COMPLETE_ALL -- this removes them, doesn't mark them done).\n"
                 "Use CHECK_EMAIL when the user asks about email, inbox, or unread messages.\n"
+                "Use PLAN_REQUEST when the user describes available time ('I have 4 hours'), asks for "
+                "help organizing/prioritizing multiple things, or wants a structured approach to a goal "
+                "('help me prepare for interviews', 'what should I focus on today'). This is different "
+                "from ADD_TASK -- the user wants a synthesized PLAN, not a single new item.\n"
+                "Use CONFIRM_PLAN when the user is confirming/agreeing to a plan Mimir JUST proposed "
+                "(e.g. 'yes, do it', 'sounds good', 'schedule those', 'go ahead') -- only use this "
+                "immediately after a plan was proposed, based on the recent conversation above.\n"
                 "Use CHAT for everything else, including casual conversation, questions about known facts, "
                 "and questions about the current time or date."
             )
@@ -421,6 +430,7 @@ NO_OP_PREFIXES = (
     "I'm not sure which task you mean",
     "I couldn't find that task anymore",
     "That's already how it's set",
+    "I don't have a plan waiting to be confirmed",
 )
 
 
@@ -446,6 +456,72 @@ def filter_job_related_emails(raw_email_summary):
     if result.upper() == "NONE":
         return "SUMMARY: 0 job-related unread emails.\nNo job-related emails right now."
     return result
+
+
+def generate_plan(user_input, recent_history=""):
+    """Synthesizes a prioritized, time-estimated plan FIRST (rather than asking
+    clarifying questions upfront) using current real tasks as grounding. Returns
+    (summary_text_for_user, structured_plan_items_for_later_confirmation)."""
+    current_tasks = todo.list_tasks("all")
+    history_block = f"\nRecent conversation:\n{recent_history}\n" if recent_history else ""
+
+    planning_prompt = [
+        {
+            "role": "system",
+            "content": (
+                f"{MIMIR_IDENTITY}\n\n"
+                "The user wants help planning/organizing. You are acting as an executive assistant doing "
+                "REAL planning work, not just asking questions. Given their current tasks and what they "
+                "just said, SYNTHESIZE a concrete, prioritized plan with realistic time estimates. Do the "
+                "work first, then offer it for confirmation -- do not just ask 'what would you like to "
+                "focus on' without proposing something concrete yourself.\n\n"
+                f"Current real tasks (ground truth):\n{current_tasks}\n"
+                f"{history_block}\n"
+                "Reply with ONLY valid JSON in this exact format:\n"
+                '{"plan": [{"task": "description", "due_text": "raw time phrase or null", '
+                '"duration_minutes": number or null}], '
+                '"summary": "a natural, conversational summary of the plan in your own voice, '
+                'ending by asking if they want you to schedule it"}\n\n'
+                "Order the plan array by priority (most important/urgent first). Keep the plan realistic "
+                "and grounded in what they actually said -- don't invent tasks unrelated to their request."
+            )
+        },
+        {"role": "user", "content": user_input}
+    ]
+    raw = call_model(planning_prompt, model=DEEP_MODEL).strip()
+
+    try:
+        result = json.loads(raw)
+    except json.JSONDecodeError:
+        return "I had trouble putting together a clear plan there -- could you tell me a bit more about what you're trying to organize?", []
+
+    plan_items = result.get("plan", [])
+    summary = result.get("summary", "Here's a plan -- want me to schedule it?")
+    return summary, plan_items
+
+
+def confirm_plan(pending_plan_items):
+    """Actually creates tasks from a previously proposed, now-confirmed plan."""
+    if not pending_plan_items:
+        return "I don't have a plan waiting to be confirmed -- want me to put one together first?"
+
+    created = []
+    for item in pending_plan_items:
+        due_iso = None
+        due_text = item.get("due_text")
+        if due_text:
+            parsed_dt = dateparser.parse(
+                due_text,
+                settings={"RELATIVE_BASE": datetime.datetime.now(), "PREFER_DATES_FROM": "future"}
+            )
+            if parsed_dt:
+                if parsed_dt.hour == 0 and parsed_dt.minute == 0 and "midnight" not in due_text.lower():
+                    parsed_dt = parsed_dt.replace(hour=9, minute=0)
+                due_iso = parsed_dt.strftime("%Y-%m-%dT%H:%M")
+        msg, _ = todo.add_task(item.get("task", "Untitled task"), due_iso)
+        created.append(item.get("task", "Untitled task"))
+
+    return f"Scheduled {len(created)} item(s) from the plan: " + ", ".join(created) + "."
 
 
 def phrase_skill_result(user_input, raw_result, conversation):
@@ -514,6 +590,7 @@ def trim_conversation(conversation):
 
 memories = load_memory()
 conversation_focus_id = None  # Phase 2: the task most recently created/discussed
+pending_plan_items = []  # Phase 7: a proposed but not-yet-confirmed plan
 
 conversation = [
     {"role": "system", "content": build_system_prompt("hello", memories, include_tasks=False)}
@@ -620,6 +697,20 @@ while True:
 
     elif intent == "CHECK_EMAIL":
         raw_result = filter_job_related_emails(gmail_reader.get_unread_summary())
+
+    elif intent == "PLAN_REQUEST":
+        summary, plan_items = generate_plan(user_input, recent_history_text)
+        pending_plan_items = plan_items
+        print("Mimir:", summary)
+        conversation.append({"role": "user", "content": user_input})
+        conversation.append({"role": "assistant", "content": summary})
+        conversation_log.log_exchange(user_input, summary)
+        trim_conversation(conversation)
+        continue
+
+    elif intent == "CONFIRM_PLAN":
+        raw_result = confirm_plan(pending_plan_items)
+        pending_plan_items = []
 
     if raw_result is not None:
         conversation[0]["content"] = build_system_prompt(user_input, memories, include_tasks=True)
