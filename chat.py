@@ -504,6 +504,7 @@ def route_message(user_input, recent_history=""):
         {"role": "user", "content": user_input}
     ]
     raw = call_model(routing_prompt, model=FAST_MODEL).strip()
+    print(f"DEBUG route raw: {raw}")
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
@@ -639,7 +640,12 @@ def phrase_skill_result(user_input, raw_result, conversation):
                 "reads as confusing duplicate-rejection language when it isn't one.\n"
                 "- Vary your sentence structure and wording naturally each time. Avoid falling into a "
                 "fixed template for confirmations -- sound like a person who happens to be good at this, "
-                "not a script running the same phrase pattern every time."
+                "not a script running the same phrase pattern every time.\n"
+                "- INTENT CHAINS: if a task with type 'event' or 'deadline' was just added and its "
+                "reminder shows 'none set', naturally offer to set one as part of your reply -- brief, "
+                "one clause, not pushy (e.g. 'want a reminder for that?'). Only do this once, only for "
+                "event/deadline types with no reminder -- don't offer this for plain tasks/reminders, "
+                "and don't chain multiple offers in one reply."
             )
         }
     ]

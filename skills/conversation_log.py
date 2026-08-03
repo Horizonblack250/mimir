@@ -86,11 +86,16 @@ def format_matches_for_prompt(matches):
     if not matches:
         return ""
     lines = [
-        "Here are potentially relevant past conversation excerpts (only reference these if they are "
-        "genuinely useful to the current message -- do not force it). IMPORTANT: these are historical "
-        "records of past conversation, NOT current status. If a past excerpt mentions a task, reminder, "
-        "or due date, do NOT treat it as still true now -- tasks may have since been completed, deleted, "
-        "or changed. Never state something as a CURRENT fact based only on one of these excerpts."
+        "Here are potentially relevant past conversation excerpts. These are HISTORICAL RECORDS ONLY, "
+        "not current status. STRICT RULES for using these:\n"
+        "- NEVER state a specific date, time, or scheduling detail from one of these excerpts as if it "
+        "is a current fact, current appointment, or something you should compare against a new request.\n"
+        "- NEVER claim a 'conflict' or 'confusion' based on an old excerpt -- the real, current task "
+        "list (shown elsewhere, when relevant) is the ONLY source of truth for what's actually scheduled.\n"
+        "- If you reference one of these at all, do so vaguely ('we may have touched on something like "
+        "this before') -- do not repeat specific numbers, times, or dates from them as established fact.\n"
+        "- When in doubt, do not mention these excerpts at all. It is always safer to say nothing than "
+        "to assert an old detail as current."
     ]
     for m in matches:
         date_str = m["timestamp"].split("T")[0]

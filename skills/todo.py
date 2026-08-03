@@ -78,9 +78,10 @@ def add_task(description, due=None, task_type="task", reminder_offset_minutes=No
         "notified_overdue": False
     })
     save_tasks(tasks)
+    reminder_str = f"{reminder_offset_minutes} min before" if reminder_offset_minutes else "none set"
     if due:
-        return f"Added task: {description} (due: {due})", task_id
-    return f"Added task: {description} (no due date/time)", task_id
+        return f"Added task: {description} (due: {due}, type: {task_type}, reminder: {reminder_str})", task_id
+    return f"Added task: {description} (no due date/time, type: {task_type}, reminder: {reminder_str})", task_id
 
 
 def get_task_by_id(task_id):
