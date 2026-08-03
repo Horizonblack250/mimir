@@ -5,6 +5,7 @@ import re
 import datetime
 import ollama
 import dateparser
+from dateparser.search import search_dates
 from dotenv import load_dotenv
 from openai import OpenAI
 from skills import todo
@@ -255,21 +256,87 @@ def get_relevant_memories(query, memories, top_n=RELEVANT_MEMORY_TOP_N, min_sim=
     return annotated
 
 
+STOPWORDS = {"the", "a", "an", "is", "are", "was", "were", "user", "users",
+             "i", "my", "me", "you", "your", "and", "or", "to", "of", "in",
+             "on", "at", "for", "with", "this", "that", "it", "has", "have"}
+
+
+def _tokenize_words(text, min_len=3):
+    words = re.findall(r"[a-z0-9']+", text.lower())
+    return {w for w in words if w not in STOPWORDS and len(w) >= min_len}
+
+
 def _shares_grounding(fact_text, user_input):
     """Sanity check: an extracted fact should share at least one meaningful word
     with what the user actually said. Catches outright fabrication -- facts with
     zero connection to the real message get rejected before they're ever saved."""
-    stopwords = {"the", "a", "an", "is", "are", "was", "were", "user", "users",
-                 "i", "my", "me", "you", "your", "and", "or", "to", "of", "in",
-                 "on", "at", "for", "with", "this", "that", "it", "has", "have"}
+    return len(_tokenize_words(fact_text) & _tokenize_words(user_input)) > 0
 
-    def tokenize(text):
-        words = re.findall(r"[a-z0-9']+", text.lower())
-        return {w for w in words if w not in stopwords and len(w) > 2}
 
-    fact_words = tokenize(fact_text)
-    input_words = tokenize(user_input)
-    return len(fact_words & input_words) > 0
+MAX_FOCUS_STACK = 5
+
+
+def extract_due_datetime(text):
+    """Searches for a date/time expression DIRECTLY in the raw text, using
+    dateparser's search function -- deterministic and reliable, unlike asking
+    the LLM to correctly identify and isolate the phrase, which has repeatedly
+    failed. This is the primary method; route.get('due_text') is now just a
+    secondary hint, not the source of truth."""
+    try:
+        results = search_dates(
+            text,
+            settings={"RELATIVE_BASE": datetime.datetime.now(), "PREFER_DATES_FROM": "future"}
+        )
+    except Exception:
+        results = None
+
+    if not results:
+        return None
+
+    matched_text, parsed_dt = results[-1]
+    if parsed_dt.hour == 0 and parsed_dt.minute == 0 and "midnight" not in matched_text.lower():
+        parsed_dt = parsed_dt.replace(hour=9, minute=0)
+    return parsed_dt.strftime("%Y-%m-%dT%H:%M")
+
+
+def push_focus(stack, task_id):
+    """Adds a task to the top of the Conversation Focus Stack. If it's already
+    in the stack, it moves to the top rather than duplicating."""
+    if task_id is None:
+        return
+    if task_id in stack:
+        stack.remove(task_id)
+    stack.append(task_id)
+    if len(stack) > MAX_FOCUS_STACK:
+        stack.pop(0)
+
+
+def resolve_focus(user_input, stack):
+    """Figures out which task in the Focus Stack is actually being referenced.
+    Prefers an explicit keyword match over blindly assuming the most recent
+    topic -- this is what lets a user naturally return to an earlier topic
+    ('actually, the dentist appointment...') after bouncing to something else,
+    instead of Mimir only ever remembering the last thing touched."""
+    if not stack:
+        return None
+
+    input_words = _tokenize_words(user_input)
+
+    best_id = None
+    best_score = 0
+    for task_id in reversed(stack):  # most recent first; ties favor recency
+        task = todo.get_task_by_id(task_id)
+        if not task:
+            continue
+        task_words = _tokenize_words(task["task"])
+        overlap = len(input_words & task_words)
+        if overlap > best_score:
+            best_score = overlap
+            best_id = task_id
+
+    if best_id is not None:
+        return best_id
+    return stack[-1]  # no explicit match -- default to most recent
 
 
 def extract_fact(user_input, existing_memories):
@@ -343,6 +410,24 @@ def extract_fact(user_input, existing_memories):
     return new_fact, supersedes_text, category
 
 
+CONFIRMATION_PHRASES = (
+    "yes", "yeah", "yep", "yup", "sure", "ok", "okay", "go ahead",
+    "do it", "sounds good", "confirm", "please do", "correct",
+    "sounds great", "schedule that", "schedule it", "schedule those"
+)
+
+
+def looks_like_confirmation(text):
+    """Deterministic check, enforced in code rather than trusted to the router --
+    if a plan is pending, we don't need to guess whether 'yes schedule that'
+    means confirm; we can just check directly."""
+    normalized = text.strip().lower().rstrip(".!")
+    return any(
+        normalized == p or normalized.startswith(p + " ") or normalized.startswith(p + ",")
+        for p in CONFIRMATION_PHRASES
+    )
+
+
 def route_message(user_input, recent_history=""):
     now_str = datetime.datetime.now().strftime("%Y-%m-%dT%H:%M")
     history_block = f"\nRecent conversation for context (most recent last):\n{recent_history}\n" if recent_history else ""
@@ -387,10 +472,14 @@ def route_message(user_input, recent_history=""):
                 "For ADD_TASK, UPDATE_TASK, and DELETE_TASK, include a 'confidence' score (0.0 to 1.0) "
                 "reflecting how CLEAR the reference/request actually is:\n"
                 "  - HIGH (0.8-1.0): the reference is unambiguous, e.g. clearly continuing something just "
-                "discussed, or a fully self-contained new task with clear details.\n"
-                "  - LOW (below 0.4): the request references something vague or unestablished, e.g. 'remind "
-                "me before THE meeting' when no specific meeting was discussed or given a date/time, or 'move "
-                "it' with no clear prior subject. When in doubt, prefer LOW over guessing.\n"
+                "discussed, or a self-contained new task -- EVEN IF it has no date/time. A plain undated "
+                "task ('remind me to buy milk', 'add a task to call mom') is perfectly normal and should "
+                "be HIGH confidence. Missing a date is NOT ambiguity.\n"
+                "  - LOW (below 0.4): ONLY when the request references a SPECIFIC THING that was never "
+                "established -- e.g. 'remind me before THE meeting' (which meeting?), 'move it' with no "
+                "clear prior subject, 'cancel that one' with multiple possible matches. This is about "
+                "unclear REFERENCES, not about missing dates/times. When in doubt between HIGH and a "
+                "genuinely undefined reference, prefer HIGH -- most requests are clear enough to just act on.\n"
                 "Use LIST_TASKS when the user wants to see/check their tasks -- including INDIRECT "
                 "phrasings like 'so I have nothing pending?', 'am I free today?', 'is my list empty?', "
                 "'anything left to do?'. Any question about whether tasks/reminders exist, are pending, "
@@ -589,7 +678,7 @@ def trim_conversation(conversation):
 
 
 memories = load_memory()
-conversation_focus_id = None  # Phase 2: the task most recently created/discussed
+conversation_focus_stack = []  # Phase 8: recently discussed tasks, most recent last
 pending_plan_items = []  # Phase 7: a proposed but not-yet-confirmed plan
 
 conversation = [
@@ -612,7 +701,10 @@ while True:
         f"{m['role']}: {m['content']}" for m in recent_turns if m["role"] in ("user", "assistant")
     )
 
-    route = route_message(user_input, recent_history_text)
+    if pending_plan_items and looks_like_confirmation(user_input):
+        route = {"intent": "CONFIRM_PLAN"}
+    else:
+        route = route_message(user_input, recent_history_text)
     intent = route.get("intent", "CHAT")
 
     raw_result = None
@@ -632,68 +724,50 @@ while True:
             )
         else:
             task_desc = route.get("task", user_input)
-            due_text = route.get("due_text")
-            due_iso = None
-            if due_text:
-                parsed_dt = dateparser.parse(
-                    due_text,
-                    settings={"RELATIVE_BASE": datetime.datetime.now(), "PREFER_DATES_FROM": "future"}
-                )
-                if parsed_dt:
-                    if parsed_dt.hour == 0 and parsed_dt.minute == 0 and "midnight" not in due_text.lower():
-                        parsed_dt = parsed_dt.replace(hour=9, minute=0)
-                    due_iso = parsed_dt.strftime("%Y-%m-%dT%H:%M")
+            due_iso = extract_due_datetime(user_input) if route.get("due_text") else None
             task_type = route.get("type", "task")
             if task_type not in ("task", "event", "reminder", "deadline", "habit"):
                 task_type = "task"
             raw_result, new_id = todo.add_task(task_desc, due_iso, task_type, route.get("reminder_offset_minutes"))
-            if new_id:
-                conversation_focus_id = new_id  # newly created task becomes the focus
+            push_focus(conversation_focus_stack, new_id)
 
     elif intent == "UPDATE_TASK":
-        if conversation_focus_id is None or confidence < LOW_CONFIDENCE_THRESHOLD:
+        target_id = resolve_focus(user_input, conversation_focus_stack)
+        if target_id is None or confidence < LOW_CONFIDENCE_THRESHOLD:
             raw_result = "I'm not sure which task you mean -- could you tell me which one?"
         else:
-            due_text = route.get("due_text")
-            due_iso = None
-            if due_text:
-                parsed_dt = dateparser.parse(
-                    due_text,
-                    settings={"RELATIVE_BASE": datetime.datetime.now(), "PREFER_DATES_FROM": "future"}
-                )
-                if parsed_dt:
-                    if parsed_dt.hour == 0 and parsed_dt.minute == 0 and "midnight" not in due_text.lower():
-                        parsed_dt = parsed_dt.replace(hour=9, minute=0)
-                    due_iso = parsed_dt.strftime("%Y-%m-%dT%H:%M")
+            due_iso = extract_due_datetime(user_input) if route.get("due_text") else None
             raw_result = todo.update_task(
-                conversation_focus_id,
+                target_id,
                 due=due_iso,
                 reminder_offset_minutes=route.get("reminder_offset_minutes"),
                 new_description=route.get("new_description")
             )
+            push_focus(conversation_focus_stack, target_id)
 
     elif intent == "DELETE_TASK":
-        if conversation_focus_id is None or confidence < LOW_CONFIDENCE_THRESHOLD:
+        target_id = resolve_focus(user_input, conversation_focus_stack)
+        if target_id is None or confidence < LOW_CONFIDENCE_THRESHOLD:
             raw_result = "I'm not sure which task you mean -- could you tell me which one?"
         else:
-            raw_result = todo.delete_task(conversation_focus_id)
-            conversation_focus_id = None  # the focused task no longer exists
+            raw_result = todo.delete_task(target_id)
+            if target_id in conversation_focus_stack:
+                conversation_focus_stack.remove(target_id)  # it no longer exists
 
     elif intent == "LIST_TASKS":
         raw_result = todo.list_tasks(route.get("filter", "all"))
 
     elif intent == "COMPLETE_TASK":
         raw_result, completed_id = todo.complete_task(route.get("number", 0))
-        if completed_id:
-            conversation_focus_id = completed_id
+        push_focus(conversation_focus_stack, completed_id)
 
     elif intent == "COMPLETE_ALL":
         raw_result = todo.complete_all()
-        conversation_focus_id = None
+        conversation_focus_stack = []
 
     elif intent == "DELETE_ALL":
         raw_result = todo.delete_all_pending()
-        conversation_focus_id = None
+        conversation_focus_stack = []
 
     elif intent == "CHECK_EMAIL":
         raw_result = filter_job_related_emails(gmail_reader.get_unread_summary())

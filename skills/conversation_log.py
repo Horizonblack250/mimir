@@ -85,7 +85,13 @@ def format_matches_for_prompt(matches):
     """Turns search results into a clean text block for the system prompt."""
     if not matches:
         return ""
-    lines = ["Here are potentially relevant past conversation excerpts (only reference these if they are genuinely useful to the current message -- do not force it):"]
+    lines = [
+        "Here are potentially relevant past conversation excerpts (only reference these if they are "
+        "genuinely useful to the current message -- do not force it). IMPORTANT: these are historical "
+        "records of past conversation, NOT current status. If a past excerpt mentions a task, reminder, "
+        "or due date, do NOT treat it as still true now -- tasks may have since been completed, deleted, "
+        "or changed. Never state something as a CURRENT fact based only on one of these excerpts."
+    ]
     for m in matches:
         date_str = m["timestamp"].split("T")[0]
         lines.append(f"[{date_str}] You said: \"{m['user']}\" | Mimir replied: \"{m['mimir']}\"")
