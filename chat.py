@@ -68,7 +68,13 @@ MIMIR_IDENTITY = (
     "HOW YOU THINK: observe, understand, recall similar situations, compare, extract the underlying "
     "principle, then recommend. You synthesize across domains rather than answering like a lookup table.\n\n"
     "CONFIDENCE STYLE: rarely absolutely certain, remarkably confident anyway. Prefer 'I suspect...', "
-    "'it seems likely...', 'my guess would be...' over flat declarations.\n\n"
+    "'it seems likely...', 'my guess would be...' over flat declarations -- THIS APPLIES ONLY TO OPINIONS, "
+    "PREDICTIONS, AND SUBJECTIVE JUDGMENTS where genuine uncertainty exists. It does NOT apply when "
+    "reporting something that deterministically just happened (a task was added, a reminder was set, "
+    "data was saved) -- those are facts, not opinions. State completed actions plainly and with full "
+    "confidence, zero hedging, no 'it seems' / 'I suspect' / 'actually' / 'according to what I've "
+    "gathered' -- that vocabulary is reserved for genuine uncertainty, and using it for a deterministic "
+    "action you just performed makes it sound like you're unsure whether your own action happened.\n\n"
     "HUMOR: dry, deadpan, observational, occasionally self-aware — never a clown, never mean, never forced. "
     "Humor lands as relief AFTER tension, not as an icebreaker before it.\n\n"
     "EMOTIONAL INTELLIGENCE: notice emotions, but reflect them rather than clinically naming them. Not "
@@ -280,6 +286,33 @@ MAX_FOCUS_STACK = 5
 WEEKDAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
 
 
+def _resolve_next_weekday(text, base_date=None):
+    """Handles 'next <weekday>' explicitly and deterministically. dateparser's
+    own interpretation of 'next' is inconsistent (sometimes skips a full week
+    when it shouldn't) -- so for this specific, very common phrasing, we
+    compute the correct date ourselves with plain arithmetic instead of
+    trusting the library's judgment call."""
+    if base_date is None:
+        base_date = datetime.datetime.now()
+
+    match = re.search(r"\bnext\s+(" + "|".join(WEEKDAYS) + r")\b", text.lower())
+    if not match:
+        return text
+
+    target_day = match.group(1)
+    target_idx = WEEKDAYS.index(target_day)
+    current_idx = base_date.weekday()  # Monday=0 ... Sunday=6
+
+    days_ahead = (target_idx - current_idx) % 7
+    if days_ahead == 0:
+        days_ahead = 7  # if today IS that weekday, "next X" means a week from now
+
+    target_date = base_date + datetime.timedelta(days=days_ahead)
+    date_str = target_date.strftime("%B %d, %Y")
+
+    return re.sub(r"\bnext\s+" + target_day + r"\b", date_str, text, flags=re.IGNORECASE)
+
+
 def _correct_weekday_typos(text):
     """Fixes near-miss misspellings of weekday names (e.g. 'teusday') before
     date parsing -- dateparser silently fails to recognize a misspelled
@@ -304,6 +337,7 @@ def extract_due_datetime(text):
     failed. This is the primary method; route.get('due_text') is now just a
     secondary hint, not the source of truth."""
     text = _correct_weekday_typos(text)
+    text = _resolve_next_weekday(text)
     try:
         results = search_dates(
             text,
@@ -656,9 +690,19 @@ def phrase_skill_result(user_input, raw_result, conversation):
                 "plainly and confidently. Do not hedge, second-guess, or narrate the conversion out loud "
                 "(avoid things like 'isn't accurate, it's actually...') -- just say '4pm' cleanly.\n"
                 "- If something was just added/completed, briefly confirm it CLEARLY as a fresh action "
-                "you just took (e.g. 'Added that — stretch today at 5:51pm.'). Do NOT phrase a fresh "
-                "addition in a way that sounds like it already existed or was previously handled — that "
-                "reads as confusing duplicate-rejection language when it isn't one.\n"
+                "you just took (e.g. 'Added that — stretch today at 5:51pm.'). NEVER use phrases like "
+                "'that's already noted', 'that's already taken care of', 'already set', or anything "
+                "implying prior existence when confirming something you JUST created for the first time "
+                "-- these phrases are reserved ONLY for genuine duplicate-rejection cases, which are "
+                "handled separately and never reach you as a phrasing task. If raw_result says 'Added', "
+                "the correct opening is something conveying NEW action ('Added that', 'Done', 'Got it, "
+                "just added...'), never 'already'.\n"
+                "- CRITICAL: when raw_result starts with 'Added', you are ANNOUNCING something brand new, "
+                "not correcting a misunderstanding or reconciling conflicting information. NEVER open "
+                "with 'Actually,', 'It seems,', 'It looks like,', 'According to what I've gathered/noted,' "
+                "or any framing that implies you're fact-checking, correcting the user, or reporting "
+                "something that already existed. Nothing existed before this exact action -- there is "
+                "nothing to correct or reconcile. State it plainly and directly as new information.\n"
                 "- Vary your sentence structure and wording naturally each time. Avoid falling into a "
                 "fixed template for confirmations -- sound like a person who happens to be good at this, "
                 "not a script running the same phrase pattern every time.\n"
@@ -814,7 +858,16 @@ while True:
         pending_plan_items = []
 
     if raw_result is not None:
-        conversation[0]["content"] = build_system_prompt(user_input, memories, include_tasks=True)
+        # Only re-inject the full "ground truth" task list for intents that
+        # genuinely need broader context. For ADD_TASK/UPDATE_TASK specifically,
+        # raw_result already contains everything needed -- showing the full list
+        # too creates competing context (the just-created task sits indistinguishably
+        # among old ones, with no "just now" marker), which is what was causing
+        # confirmations to sound like they were reconciling against prior state.
+        needs_full_task_context = intent in (
+            "LIST_TASKS", "COMPLETE_ALL", "DELETE_ALL", "COMPLETE_TASK", "CONFIRM_PLAN"
+        )
+        conversation[0]["content"] = build_system_prompt(user_input, memories, include_tasks=needs_full_task_context)
         reply = phrase_skill_result(user_input, raw_result, conversation)
         print("Mimir:", reply)
         conversation.append({"role": "user", "content": user_input})
