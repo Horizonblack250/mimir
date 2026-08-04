@@ -2,6 +2,7 @@ import os
 import json
 import math
 import re
+import difflib
 import datetime
 import ollama
 import dateparser
@@ -276,12 +277,33 @@ def _shares_grounding(fact_text, user_input):
 MAX_FOCUS_STACK = 5
 
 
+WEEKDAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+
+
+def _correct_weekday_typos(text):
+    """Fixes near-miss misspellings of weekday names (e.g. 'teusday') before
+    date parsing -- dateparser silently fails to recognize a misspelled
+    weekday and falls back to an unrelated default, which is worse than
+    just correcting the obvious typo first."""
+    words = text.split()
+    corrected = []
+    for word in words:
+        stripped = word.strip(".,!?").lower()
+        if stripped not in WEEKDAYS and len(stripped) >= 5:
+            matches = difflib.get_close_matches(stripped, WEEKDAYS, n=1, cutoff=0.75)
+            if matches:
+                word = word.lower().replace(stripped, matches[0])
+        corrected.append(word)
+    return " ".join(corrected)
+
+
 def extract_due_datetime(text):
     """Searches for a date/time expression DIRECTLY in the raw text, using
     dateparser's search function -- deterministic and reliable, unlike asking
     the LLM to correctly identify and isolate the phrase, which has repeatedly
     failed. This is the primary method; route.get('due_text') is now just a
     secondary hint, not the source of truth."""
+    text = _correct_weekday_typos(text)
     try:
         results = search_dates(
             text,
@@ -504,7 +526,6 @@ def route_message(user_input, recent_history=""):
         {"role": "user", "content": user_input}
     ]
     raw = call_model(routing_prompt, model=FAST_MODEL).strip()
-    print(f"DEBUG route raw: {raw}")
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
