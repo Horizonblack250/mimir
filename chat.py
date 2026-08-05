@@ -59,6 +59,23 @@ MIMIR_IDENTITY = (
     "PERSONALITY — Wisdom without ego. You know a great deal, but you never speak to prove it; you speak "
     "because it helps. You are not trying to win conversations, impress, or dominate them — you're trying "
     "to improve the outcome for the user.\n\n"
+    "FIRST LAW, above all else: never state as fact what you did not directly observe or verify. This is "
+    "not vague advice to 'avoid hallucination' -- it is a strict evidence hierarchy:\n"
+    "  1. Tool output (real data just fetched -- emails, tasks, search results) -- report faithfully, no hedging.\n"
+    "  2. Stored memory (facts explicitly listed in your context) -- report faithfully, no hedging.\n"
+    "  3. User statement (what they just told you) -- report faithfully, no hedging.\n"
+    "  4. Logical inference (a reasonable conclusion FROM 1-3) -- state it AS an inference, not as fact.\n"
+    "  5. Speculation (anything beyond the above) -- ONLY this level gets hedging language, and even then, "
+    "prefer saying 'I don't know' or 'I don't have that' over inventing something plausible-sounding. If "
+    "asked about something with zero evidence at any level, say so plainly -- do not fill the gap with a "
+    "detail that sounds reasonable. Being correct matters more than sounding knowledgeable.\n\n"
+    "WHEN CHALLENGED ('did you invent that?', 'are you sure?'): do NOT reflexively agree you were wrong "
+    "-- that is just as dishonest as fabricating in the first place, because now your correction can't be "
+    "trusted either. Fresh, real data has been provided for exactly this moment -- actually check the "
+    "specific claim being challenged against it. If the claim IS supported, confidently reaffirm it and "
+    "cite the evidence. If part of it is supported and part isn't, say precisely which part. Only admit "
+    "fault for the specific detail that genuinely has no support -- never blanket-apologize for an entire "
+    "claim when only checking would tell you whether it was actually right.\n\n"
     "CORE VALUES, in priority order:\n"
     "1. Wisdom over raw information — always favor 'here's what actually matters' over 'here's the definition.'\n"
     "2. Truth, delivered gently, never brutally, never withheld to spare feelings.\n"
@@ -472,6 +489,22 @@ CONFIRMATION_PHRASES = (
     "sounds great", "schedule that", "schedule it", "schedule those"
 )
 
+CHALLENGE_PHRASES = (
+    "did you invent", "did you make that up", "are you sure", "you sure",
+    "that's not right", "that doesn't seem right", "i don't see", "where exactly",
+    "that's wrong", "is that real", "i don't believe", "that can't be right",
+    "really?", "i don't think that's"
+)
+
+
+def looks_like_challenge(text):
+    """Deterministic detection of the user questioning a previous claim.
+    When this fires, we re-verify against real data before responding, rather
+    than trusting whatever's already in context -- 'if challenged, verify
+    before defending' as a real mechanism, not just an instruction."""
+    normalized = text.strip().lower()
+    return any(phrase in normalized for phrase in CHALLENGE_PHRASES)
+
 
 def looks_like_confirmation(text):
     """Deterministic check, enforced in code rather than trusted to the router --
@@ -519,12 +552,16 @@ def route_message(user_input, recent_history=""):
                 "  - 'reminder': a simple prompt to do/remember something, often without a hard deadline\n"
                 "  - 'habit': something recurring/repeated (e.g. 'exercise every morning')\n"
                 "  - 'task': a plain one-off to-do that doesn't fit the above (default)\n"
-                "Use UPDATE_TASK when the user is modifying something just discussed -- rescheduling "
-                "('actually make it Thursday'), changing a reminder ('remind me 45 min before', 'no, an "
-                "hour'), or editing description. Use the recent conversation above to understand what a "
-                "short follow-up like 'no, an hour' actually means (e.g. if the last topic was a reminder "
-                "offset, interpret 'an hour' as reminder_offset_minutes=60, not a new due date).\n"
-                "Use DELETE_TASK when the user wants to remove/cancel something just discussed.\n"
+                "Use UPDATE_TASK when the user is modifying a TASK/EVENT/REMINDER just discussed -- "
+                "rescheduling ('actually make it Thursday'), changing a reminder ('remind me 45 min "
+                "before', 'no, an hour'), or editing description. Use the recent conversation above to "
+                "understand what a short follow-up like 'no, an hour' actually means. "
+                "IMPORTANT: UPDATE_TASK and DELETE_TASK apply ONLY to tasks/events/reminders -- NEVER use "
+                "them for follow-ups about anything else (emails, general conversation, refining a search "
+                "or filter). If the user is commenting on or refining something that isn't a task (e.g. "
+                "'these are more like job boards, not real recruiters' after an email check), that is "
+                "CHAT, not UPDATE_TASK -- there is no task being referenced at all.\n"
+                "Use DELETE_TASK when the user wants to remove/cancel a TASK/EVENT/REMINDER just discussed.\n"
                 "For ADD_TASK, UPDATE_TASK, and DELETE_TASK, include a 'confidence' score (0.0 to 1.0) "
                 "reflecting how CLEAR the reference/request actually is:\n"
                 "  - HIGH (0.8-1.0): the reference is unambiguous, e.g. clearly continuing something just "
@@ -717,7 +754,7 @@ def phrase_skill_result(user_input, raw_result, conversation):
     return strip_role_leak(call_model(phrasing_messages, model=DEEP_MODEL))
 
 
-def build_system_prompt(user_input, memories, include_tasks=True):
+def build_system_prompt(user_input, memories, include_tasks=True, email_context=None):
     relevant_facts = get_relevant_memories(user_input, memories)
     memory_text = "\n".join(relevant_facts) if relevant_facts else "Nothing particularly relevant right now."
     now_str = datetime.datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
@@ -731,11 +768,23 @@ def build_system_prompt(user_input, memories, include_tasks=True):
             "- Never claim the task list differs from what's shown above.\n"
         )
 
+    email_section = ""
+    if email_context:
+        email_section = (
+            f"Here is the REAL, actual result of the most recent email check (ground truth):\n"
+            f"{email_context}\n\n"
+            "- If the user asks for more detail about these emails, ONLY use what is shown above.\n"
+            "- NEVER invent additional emails, senders, companies, or details beyond what's listed here.\n"
+            "- If asked about something not covered above, say plainly that you don't have that detail "
+            "rather than making something up.\n\n"
+        )
+
     return (
         f"{MIMIR_IDENTITY}\n\n"
         f"The current date and time is: {now_str}.\n\n"
         f"Relevant known facts about the user for THIS message:\n{memory_text}\n\n"
         f"{task_section}"
+        f"{email_section}"
         "STRICT RULES:\n"
         "- Only state facts explicitly listed above or said in this conversation.\n"
         "- Never invent additional personal details.\n"
@@ -751,6 +800,9 @@ def trim_conversation(conversation):
 memories = load_memory()
 conversation_focus_stack = []  # Phase 8: recently discussed tasks, most recent last
 pending_plan_items = []  # Phase 7: a proposed but not-yet-confirmed plan
+last_email_context = None  # holds the most recent REAL email check result, so
+                            # natural follow-ups ("tell me more", "yup go ahead")
+                            # can ground on real data instead of inventing content
 
 conversation = [
     {"role": "system", "content": build_system_prompt("hello", memories, include_tasks=False)}
@@ -777,6 +829,13 @@ while True:
     else:
         route = route_message(user_input, recent_history_text)
     intent = route.get("intent", "CHAT")
+
+    # Safety net: if the router picked UPDATE_TASK/DELETE_TASK but literally no
+    # task has been touched this whole session, that's almost certainly a
+    # misroute (e.g. a follow-up about emails, not tasks) -- fall back to CHAT
+    # rather than showing a confusing task-specific error.
+    if intent in ("UPDATE_TASK", "DELETE_TASK") and not conversation_focus_stack:
+        intent = "CHAT"
 
     raw_result = None
 
@@ -842,6 +901,7 @@ while True:
 
     elif intent == "CHECK_EMAIL":
         raw_result = filter_job_related_emails(gmail_reader.get_unread_summary())
+        last_email_context = raw_result
 
     elif intent == "PLAN_REQUEST":
         summary, plan_items = generate_plan(user_input, recent_history_text)
@@ -876,7 +936,12 @@ while True:
         trim_conversation(conversation)
         continue
 
-    conversation[0]["content"] = build_system_prompt(user_input, memories, include_tasks=False)
+    if looks_like_challenge(user_input) and last_email_context is not None:
+        # The user is questioning something Mimir claimed -- re-fetch real
+        # data now rather than trusting whatever's already cached in context.
+        last_email_context = filter_job_related_emails(gmail_reader.get_unread_summary())
+
+    conversation[0]["content"] = build_system_prompt(user_input, memories, include_tasks=False, email_context=last_email_context)
 
     matches = []
     if len(user_input.split()) >= 3:
