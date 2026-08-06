@@ -506,6 +506,43 @@ def looks_like_challenge(text):
     return any(phrase in normalized for phrase in CHALLENGE_PHRASES)
 
 
+def verify_challenged_claim(previous_reply, real_data):
+    """Forces an actual comparison between what Mimir previously said and the
+    real, freshly-fetched data -- via structured output, not open conversation.
+    Claim-level granularity: a reply is rarely wholly right or wholly wrong --
+    breaking it into individual claims lets corrections be surgical (fix only
+    the unsupported part) instead of a blanket retraction of everything said.
+
+    IMPORTANT: this function deliberately receives ONLY previous_reply and
+    real_data -- never the user's challenging message or its tone. The verdict
+    must be driven purely by evidence, not by how confidently the user pushed
+    back. This is what prevents the verifier from recreating the same
+    social-pressure problem it exists to solve."""
+    verify_prompt = [
+        {
+            "role": "system",
+            "content": (
+                "Break down a previous AI reply into its individual factual claims, and check EACH ONE "
+                "against the REAL, verified data it should have been based on.\n\n"
+                f"Previous reply:\n{previous_reply}\n\n"
+                f"Real, verified data:\n{real_data}\n\n"
+                "Reply with ONLY valid JSON, no other text:\n"
+                '{"supported_claims": ["claims that ARE backed by the real data, with the specific evidence"], '
+                '"contradicted_claims": ["specific claims that are NOT backed by or conflict with the real data"], '
+                '"unverifiable_claims": ["claims the real data neither confirms nor denies"]}\n\n'
+                "Most replies will have claims in multiple categories at once -- that's expected and correct, "
+                "not an error. Only put a claim in contradicted_claims if the real data actively lacks it or "
+                "conflicts with it, not merely because it wasn't explicitly restated."
+            )
+        }
+    ]
+    raw = call_model(verify_prompt, model=FAST_MODEL).strip()
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return {"supported_claims": [], "contradicted_claims": [], "unverifiable_claims": ["(verification parsing failed)"]}
+
+
 def looks_like_confirmation(text):
     """Deterministic check, enforced in code rather than trusted to the router --
     if a plan is pending, we don't need to guess whether 'yes schedule that'
@@ -937,9 +974,43 @@ while True:
         continue
 
     if looks_like_challenge(user_input) and last_email_context is not None:
-        # The user is questioning something Mimir claimed -- re-fetch real
-        # data now rather than trusting whatever's already cached in context.
+        # The user is questioning something Mimir claimed. Re-fetch real data,
+        # then run an actual structured comparison (not open conversation) to
+        # determine the real verdict BEFORE generating any reply -- this is
+        # what stops reflexive over-apologizing under social pressure.
         last_email_context = filter_job_related_emails(gmail_reader.get_unread_summary())
+
+        previous_reply = ""
+        for m in reversed(conversation):
+            if m["role"] == "assistant":
+                previous_reply = m["content"]
+                break
+
+        verdict = verify_challenged_claim(previous_reply, last_email_context)
+
+        supported = verdict.get("supported_claims", [])
+        contradicted = verdict.get("contradicted_claims", [])
+        unverifiable = verdict.get("unverifiable_claims", [])
+
+        parts = ["VERIFICATION RESULT (claim-by-claim, from a real re-check -- respond precisely to each part, do not blanket-apologize or blanket-reaffirm):"]
+        if supported:
+            parts.append(f"SUPPORTED (state these confidently, cite the evidence, no apology): {supported}")
+        if contradicted:
+            parts.append(f"NOT SUPPORTED (acknowledge ONLY these specific points as incorrect, nothing more): {contradicted}")
+        if unverifiable:
+            parts.append(f"CANNOT VERIFY (say plainly you can't confirm these, don't guess either way): {unverifiable}")
+        if not (supported or contradicted or unverifiable):
+            parts.append("No specific claims could be identified to check -- ask the user to clarify what to verify.")
+
+        verification_result = "\n".join(parts)
+
+        reply = phrase_skill_result(user_input, verification_result, conversation)
+        print("Mimir:", reply)
+        conversation.append({"role": "user", "content": user_input})
+        conversation.append({"role": "assistant", "content": reply})
+        conversation_log.log_exchange(user_input, reply)
+        trim_conversation(conversation)
+        continue
 
     conversation[0]["content"] = build_system_prompt(user_input, memories, include_tasks=False, email_context=last_email_context)
 
