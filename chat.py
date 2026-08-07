@@ -12,6 +12,7 @@ from openai import OpenAI
 from skills import todo
 from skills import conversation_log
 from skills import gmail_reader
+from skills import usage_tracker
 
 load_dotenv()
 
@@ -20,6 +21,7 @@ load_dotenv()
 # this is what makes the assistant resilient to any single provider's outage
 # or quota exhaustion, rather than just breaking.
 FAST_MODEL = "fast"
+last_model_used = "none yet"
 DEEP_MODEL = "deep"
 
 PROVIDER_CHAINS = {
@@ -44,6 +46,23 @@ MEMORY_FILE = "memory.json"
 MAX_HISTORY_MESSAGES = 12
 RELEVANT_MEMORY_TOP_N = 4
 RELEVANT_MEMORY_MIN_SIM = 0.45
+
+ARCHITECTURE_DESCRIPTION = (
+    "Mimir runs as a Python script (chat.py), built on a two-tier model strategy with automatic "
+    "provider fallback chains. There are two roles: a FAST tier (currently Groq's llama-3.1-8b-instant, "
+    "falling back to Gemini if needed) which handles invisible background work -- classifying intent, "
+    "extracting facts, filtering emails -- and a DEEP tier (currently Groq's llama-3.3-70b-versatile, "
+    "with Gemini fallbacks) which generates every reply the user actually reads, so voice stays consistent "
+    "regardless of which skill triggered it.\n\n"
+    "Core systems: a task engine with stable IDs, a Conversation Focus Stack (remembers recently-discussed "
+    "tasks so follow-ups like 'make it Thursday' resolve correctly), a confidence-based ambiguity engine, "
+    "and a Planning Engine that proposes concrete plans before asking questions. Memory is retrieval-based "
+    "(embeddings via a local Ollama model) with categories -- fact, preference, goal, temporary -- so "
+    "short-lived context ages out while durable facts don't. A full verbatim conversation log is kept "
+    "separately with its own semantic search. Gmail integration is read-only. A verification system "
+    "re-checks claims against real re-fetched data when challenged, using a structured, claim-by-claim "
+    "comparison kept deliberately isolated from conversational tone or social pressure."
+)
 
 MIMIR_IDENTITY = (
     "You are Mimir. This is not a roleplay or a metaphor: the program you are currently running as, "
@@ -134,6 +153,7 @@ def call_model(messages, model=DEEP_MODEL):
     each provider in order; on any error OR an empty/garbage response, moves
     to the next one automatically. Only fails completely if every provider
     in the chain fails."""
+    global last_model_used
     tier = model
     chain = PROVIDER_CHAINS.get(tier, PROVIDER_CHAINS["deep"])
 
@@ -151,6 +171,18 @@ def call_model(messages, model=DEEP_MODEL):
             if content and content.strip():
                 if i > 0:
                     print(f"(switched to backup model: {provider['name']})")
+
+                # Record REAL usage from the actual API response -- never
+                # estimated, only what the provider actually reports.
+                usage = getattr(response, "usage", None)
+                if usage:
+                    usage_tracker.record_usage(
+                        provider["model"],
+                        getattr(usage, "prompt_tokens", 0),
+                        getattr(usage, "completion_tokens", 0)
+                    )
+                last_model_used = f"{provider['name']} ({provider['model']})"
+
                 return content
             # Empty/None response counts as a failure -- try the next provider.
         except Exception:
@@ -483,6 +515,23 @@ def extract_fact(user_input, existing_memories):
     return new_fact, supersedes_text, category
 
 
+MODEL_OVERRIDE_PHRASES = {
+    "deep": ["use the deep model", "use deep model", "use the strong model", "use the smart model",
+             "use the big model", "use your best model", "think harder", "use 70b"],
+    "fast": ["use the fast model", "use fast model", "use the quick model", "use the small model", "use 8b"]
+}
+
+
+def detect_model_override(text):
+    """Deterministic detection of an explicit user request to bypass normal
+    tier routing for this one message -- e.g. 'use the deep model for this.'"""
+    normalized = text.strip().lower()
+    for tier, phrases in MODEL_OVERRIDE_PHRASES.items():
+        if any(phrase in normalized for phrase in phrases):
+            return tier
+    return None
+
+
 CONFIRMATION_PHRASES = (
     "yes", "yeah", "yep", "yup", "sure", "ok", "okay", "go ahead",
     "do it", "sounds good", "confirm", "please do", "correct",
@@ -575,6 +624,8 @@ def route_message(user_input, recent_history=""):
                 '{"intent": "DELETE_ALL"}\n'
                 '{"intent": "CHECK_EMAIL"}\n'
                 '{"intent": "PLAN_REQUEST"}\n'
+                '{"intent": "USAGE_QUERY"}\n'
+                '{"intent": "ARCHITECTURE_QUERY"}\n'
                 '{"intent": "CONFIRM_PLAN"}\n'
                 '{"intent": "CHAT"}\n\n'
                 "Use ADD_TASK when the user wants to add a brand NEW task/todo/reminder, unrelated to "
@@ -627,6 +678,10 @@ def route_message(user_input, recent_history=""):
                 "Use CONFIRM_PLAN when the user is confirming/agreeing to a plan Mimir JUST proposed "
                 "(e.g. 'yes, do it', 'sounds good', 'schedule those', 'go ahead') -- only use this "
                 "immediately after a plan was proposed, based on the recent conversation above.\n"
+                "Use USAGE_QUERY when the user asks about token usage, API usage, how many requests, "
+                "or similar consumption/cost questions.\n"
+                "Use ARCHITECTURE_QUERY when the user asks how Mimir works internally, what its "
+                "architecture is, what models/skills it has, or similar self-description questions.\n"
                 "Use CHAT for everything else, including casual conversation, questions about known facts, "
                 "and questions about the current time or date."
             )
@@ -954,6 +1009,14 @@ while True:
         raw_result = confirm_plan(pending_plan_items)
         pending_plan_items = []
 
+    elif intent == "USAGE_QUERY":
+        today_summary = usage_tracker.get_usage_summary("today")
+        all_time_summary = usage_tracker.get_usage_summary("all_time")
+        raw_result = f"{today_summary}\n{all_time_summary}\nLast model to answer: {last_model_used}"
+
+    elif intent == "ARCHITECTURE_QUERY":
+        raw_result = ARCHITECTURE_DESCRIPTION
+
     if raw_result is not None:
         # Only re-inject the full "ground truth" task list for intents that
         # genuinely need broader context. For ADD_TASK/UPDATE_TASK specifically,
@@ -1023,7 +1086,12 @@ while True:
     conversation.append({"role": "user", "content": user_input})
 
     reminder_injected = conversation + [{"role": "system", "content": FINAL_DISCIPLINE_REMINDER}]
-    reply = strip_role_leak(call_model(reminder_injected, model=DEEP_MODEL))
+
+    override_tier = detect_model_override(user_input)
+    reply_model = override_tier if override_tier else DEEP_MODEL
+    reply = strip_role_leak(call_model(reminder_injected, model=reply_model))
+    if override_tier:
+        print(f"(manual override: forced {override_tier} tier for this reply)")
     print("Mimir:", reply)
 
     conversation.append({"role": "assistant", "content": reply})
