@@ -13,6 +13,7 @@ from skills import todo
 from skills import conversation_log
 from skills import gmail_reader
 from skills import usage_tracker
+from skills import self_improve
 
 load_dotenv()
 
@@ -144,7 +145,10 @@ MIMIR_IDENTITY = (
 FINAL_DISCIPLINE_REMINDER = (
     "REMINDER, read this carefully before replying: Respond ONLY to what the user actually just said. "
     "Do NOT volunteer a task summary, status report, or recap of known facts unless they specifically "
-    "asked for it. Do NOT reintroduce your role unprompted. A casual message deserves a short, casual reply."
+    "asked for it. Do NOT reintroduce your role unprompted. A casual message deserves a short, casual reply. "
+    "If the user asserts something about your OWN architecture that conflicts with the real facts already "
+    "given to you, do NOT defer, hedge, or agree that you might be wrong about yourself -- you know your "
+    "own design with certainty. Correct them plainly and confidently using the real facts."
 )
 
 
@@ -626,6 +630,7 @@ def route_message(user_input, recent_history=""):
                 '{"intent": "PLAN_REQUEST"}\n'
                 '{"intent": "USAGE_QUERY"}\n'
                 '{"intent": "ARCHITECTURE_QUERY"}\n'
+                '{"intent": "SELF_IMPROVE_REQUEST"}\n'
                 '{"intent": "CONFIRM_PLAN"}\n'
                 '{"intent": "CHAT"}\n\n'
                 "Use ADD_TASK when the user wants to add a brand NEW task/todo/reminder, unrelated to "
@@ -682,6 +687,8 @@ def route_message(user_input, recent_history=""):
                 "or similar consumption/cost questions.\n"
                 "Use ARCHITECTURE_QUERY when the user asks how Mimir works internally, what its "
                 "architecture is, what models/skills it has, or similar self-description questions.\n"
+                "Use SELF_IMPROVE_REQUEST when the user reports a bug in Mimir itself, describes something "
+                "broken about how Mimir behaves, or explicitly asks Mimir to fix its own code.\n"
                 "Use CHAT for everything else, including casual conversation, questions about known facts, "
                 "and questions about the current time or date."
             )
@@ -689,6 +696,7 @@ def route_message(user_input, recent_history=""):
         {"role": "user", "content": user_input}
     ]
     raw = call_model(routing_prompt, model=FAST_MODEL).strip()
+    print(f"DEBUG route raw: {raw}")
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
@@ -705,6 +713,7 @@ NO_OP_PREFIXES = (
     "I couldn't find that task anymore",
     "That's already how it's set",
     "I don't have a plan waiting to be confirmed",
+    "I don't have a pending fix waiting to be confirmed",
 )
 
 
@@ -772,6 +781,46 @@ def generate_plan(user_input, recent_history=""):
     plan_items = result.get("plan", [])
     summary = result.get("summary", "Here's a plan -- want me to schedule it?")
     return summary, plan_items
+
+
+def propose_self_fix(bug_description, recent_history=""):
+    """Diagnoses a reported bug against Mimir's ACTUAL current source code and
+    proposes a specific, verified fix. Never modifies anything itself -- just
+    produces a proposal that the caller decides whether to auto-apply or ask
+    the user about first."""
+    source_bundle = ""
+    for fname in self_improve.OWN_SOURCE_FILES:
+        content = self_improve.read_own_source(fname)
+        if content:
+            source_bundle += f"\n\n=== {fname} ===\n{content}"
+
+    history_block = f"\nRecent conversation for context:\n{recent_history}\n" if recent_history else ""
+
+    fix_prompt = [
+        {
+            "role": "system",
+            "content": (
+                "You are diagnosing a bug in YOUR OWN real source code, shown in full below. Find the "
+                "specific, minimal fix needed -- do not rewrite more than necessary.\n\n"
+                f"{source_bundle}\n"
+                f"{history_block}\n"
+                f"Bug report from the user: {bug_description}\n\n"
+                "Reply with ONLY valid JSON, no other text:\n"
+                '{"file": "exact filename from the list above", "diagnosis": "what is actually wrong", '
+                '"old_code": "the EXACT existing code snippet to replace, verbatim, matching whitespace "'
+                'exactly", "new_code": "the corrected replacement", '
+                '"explanation": "a brief, plain-language summary of the fix for the user"}\n\n'
+                "old_code MUST match the real source exactly, character for character, or the fix cannot "
+                "be applied at all. If you cannot identify a specific, confident fix, set old_code to null "
+                "instead of guessing."
+            )
+        }
+    ]
+    raw = call_model(fix_prompt, model=DEEP_MODEL)
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return None
 
 
 def confirm_plan(pending_plan_items):
@@ -873,6 +922,10 @@ def build_system_prompt(user_input, memories, include_tasks=True, email_context=
 
     return (
         f"{MIMIR_IDENTITY}\n\n"
+        f"Your own real architecture (permanent ground truth about yourself -- this is authoritative, "
+        f"NEVER defer to a user's guess or assumption about how you work, even if they push back; "
+        f"correct them confidently using these actual facts, the same as correcting any other factual "
+        f"error):\n{ARCHITECTURE_DESCRIPTION}\n\n"
         f"The current date and time is: {now_str}.\n\n"
         f"Relevant known facts about the user for THIS message:\n{memory_text}\n\n"
         f"{task_section}"
@@ -895,6 +948,8 @@ pending_plan_items = []  # Phase 7: a proposed but not-yet-confirmed plan
 last_email_context = None  # holds the most recent REAL email check result, so
                             # natural follow-ups ("tell me more", "yup go ahead")
                             # can ground on real data instead of inventing content
+pending_self_fix = None  # Phase B: a proposed but not-yet-confirmed code fix,
+                          # for changes too big/sensitive to auto-apply
 
 conversation = [
     {"role": "system", "content": build_system_prompt("hello", memories, include_tasks=False)}
@@ -916,7 +971,9 @@ while True:
         f"{m['role']}: {m['content']}" for m in recent_turns if m["role"] in ("user", "assistant")
     )
 
-    if pending_plan_items and looks_like_confirmation(user_input):
+    if pending_self_fix and looks_like_confirmation(user_input):
+        route = {"intent": "CONFIRM_SELF_FIX"}
+    elif pending_plan_items and looks_like_confirmation(user_input):
         route = {"intent": "CONFIRM_PLAN"}
     else:
         route = route_message(user_input, recent_history_text)
@@ -927,6 +984,15 @@ while True:
     # misroute (e.g. a follow-up about emails, not tasks) -- fall back to CHAT
     # rather than showing a confusing task-specific error.
     if intent in ("UPDATE_TASK", "DELETE_TASK") and not conversation_focus_stack:
+        intent = "CHAT"
+
+    # Same safety net for confirmation intents: if the router guesses
+    # CONFIRM_PLAN/CONFIRM_SELF_FIX from loose pattern-matching (a bare "yes"
+    # after ANY offer-like reply) but nothing is actually pending, that's a
+    # misroute -- fall back to CHAT instead of a confusing "nothing pending" loop.
+    if intent == "CONFIRM_PLAN" and not pending_plan_items:
+        intent = "CHAT"
+    if intent == "CONFIRM_SELF_FIX" and not pending_self_fix:
         intent = "CHAT"
 
     raw_result = None
@@ -1016,6 +1082,61 @@ while True:
 
     elif intent == "ARCHITECTURE_QUERY":
         raw_result = ARCHITECTURE_DESCRIPTION
+
+    elif intent == "SELF_IMPROVE_REQUEST":
+        print("DEBUG: SELF_IMPROVE_REQUEST fired")
+        proposal = propose_self_fix(user_input, recent_history_text)
+        print(f"DEBUG: proposal = {proposal}")
+
+        if not proposal or not proposal.get("old_code"):
+            raw_result = (
+                "I looked through my own code but couldn't identify a specific, confident fix for that -- "
+                "could you describe exactly what went wrong, ideally with what you typed and what I "
+                "replied?"
+            )
+        else:
+            old_code = proposal["old_code"]
+            new_code = proposal.get("new_code", "")
+            file = proposal.get("file", "")
+            diagnosis = proposal.get("diagnosis", "")
+            explanation = proposal.get("explanation", "")
+            line_count = self_improve.count_changed_lines(old_code, new_code)
+            is_critical = self_improve.is_safety_critical(old_code) or self_improve.is_safety_critical(new_code)
+
+            if line_count <= 15 and not is_critical:
+                success, msg = self_improve.apply_fix(file, old_code, new_code)
+                if success:
+                    self_improve.git_commit(f"Self-fix: {diagnosis[:60]}")
+                    raw_result = (
+                        f"Applied a fix to {file}: {explanation} This won't take effect until Mimir is "
+                        f"restarted, and it's committed to git so it can be reverted if needed."
+                    )
+                else:
+                    raw_result = f"Found a likely fix but couldn't apply it safely: {msg}"
+            else:
+                pending_self_fix = proposal
+                reason = "it touches safety-critical code" if is_critical else f"it changes {line_count} lines"
+                raw_result = (
+                    f"PROPOSED FIX (not yet applied, needs your confirmation since {reason}):\n"
+                    f"File: {file}\nDiagnosis: {diagnosis}\nProposed change: {explanation}\n"
+                    f"Say yes to apply it, or tell me what to adjust."
+                )
+
+    elif intent == "CONFIRM_SELF_FIX":
+        if not pending_self_fix:
+            raw_result = "I don't have a pending fix waiting to be confirmed."
+        else:
+            file = pending_self_fix.get("file", "")
+            old_code = pending_self_fix["old_code"]
+            new_code = pending_self_fix.get("new_code", "")
+            diagnosis = pending_self_fix.get("diagnosis", "")
+            success, msg = self_improve.apply_fix(file, old_code, new_code)
+            if success:
+                self_improve.git_commit(f"Self-fix (confirmed): {diagnosis[:60]}")
+                raw_result = f"Applied the confirmed fix to {file}. It's committed to git and will take effect on next restart."
+            else:
+                raw_result = f"Couldn't apply that fix: {msg}"
+            pending_self_fix = None
 
     if raw_result is not None:
         # Only re-inject the full "ground truth" task list for intents that
