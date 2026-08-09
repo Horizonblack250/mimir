@@ -696,7 +696,6 @@ def route_message(user_input, recent_history=""):
         {"role": "user", "content": user_input}
     ]
     raw = call_model(routing_prompt, model=FAST_MODEL).strip()
-    print(f"DEBUG route raw: {raw}")
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
@@ -714,6 +713,7 @@ NO_OP_PREFIXES = (
     "That's already how it's set",
     "I don't have a plan waiting to be confirmed",
     "I don't have a pending fix waiting to be confirmed",
+    "I looked through my own code but couldn't identify",
 )
 
 
@@ -783,16 +783,39 @@ def generate_plan(user_input, recent_history=""):
     return summary, plan_items
 
 
+def identify_likely_file(bug_description):
+    """Cheap FAST-tier lookup: which single file is most likely responsible?
+    Avoids ever needing to send every source file in one prompt, which risks
+    hitting per-request token limits as the codebase grows."""
+    file_list = "\n".join(f"- {f}" for f in self_improve.OWN_SOURCE_FILES)
+    prompt = [
+        {
+            "role": "system",
+            "content": (
+                f"Given this bug report, which ONE file is most likely responsible? Files:\n{file_list}\n\n"
+                f"Bug report: {bug_description}\n\n"
+                "Reply with ONLY the exact filename from the list above, nothing else."
+            )
+        }
+    ]
+    raw = call_model(prompt, model=FAST_MODEL).strip()
+    for f in self_improve.OWN_SOURCE_FILES:
+        if f in raw:
+            return f
+    return "chat.py"
+
+
 def propose_self_fix(bug_description, recent_history=""):
     """Diagnoses a reported bug against Mimir's ACTUAL current source code and
     proposes a specific, verified fix. Never modifies anything itself -- just
     produces a proposal that the caller decides whether to auto-apply or ask
-    the user about first."""
-    source_bundle = ""
-    for fname in self_improve.OWN_SOURCE_FILES:
-        content = self_improve.read_own_source(fname)
-        if content:
-            source_bundle += f"\n\n=== {fname} ===\n{content}"
+    the user about first. Two-stage: identify the likely file cheaply first,
+    then send only that file's content for the actual fix -- not the whole
+    codebase at once."""
+    likely_file = identify_likely_file(bug_description)
+    source_content = self_improve.read_own_source(likely_file)
+    if source_content is None:
+        return None
 
     history_block = f"\nRecent conversation for context:\n{recent_history}\n" if recent_history else ""
 
@@ -800,19 +823,20 @@ def propose_self_fix(bug_description, recent_history=""):
         {
             "role": "system",
             "content": (
-                "You are diagnosing a bug in YOUR OWN real source code, shown in full below. Find the "
+                f"You are diagnosing a bug in YOUR OWN real source code, file: {likely_file}. Find the "
                 "specific, minimal fix needed -- do not rewrite more than necessary.\n\n"
-                f"{source_bundle}\n"
+                f"=== {likely_file} ===\n{source_content}\n"
                 f"{history_block}\n"
                 f"Bug report from the user: {bug_description}\n\n"
                 "Reply with ONLY valid JSON, no other text:\n"
-                '{"file": "exact filename from the list above", "diagnosis": "what is actually wrong", '
-                '"old_code": "the EXACT existing code snippet to replace, verbatim, matching whitespace "'
+                f'{{"file": "{likely_file}", "diagnosis": "what is actually wrong", '
+                '"old_code": "the EXACT existing code snippet to replace, verbatim, matching whitespace '
                 'exactly", "new_code": "the corrected replacement", '
                 '"explanation": "a brief, plain-language summary of the fix for the user"}\n\n'
                 "old_code MUST match the real source exactly, character for character, or the fix cannot "
                 "be applied at all. If you cannot identify a specific, confident fix, set old_code to null "
-                "instead of guessing."
+                "instead of guessing. If the bug seems to actually be in a different file, still do your "
+                f"best with what you have, or set old_code to null."
             )
         }
     ]
@@ -1078,15 +1102,17 @@ while True:
     elif intent == "USAGE_QUERY":
         today_summary = usage_tracker.get_usage_summary("today")
         all_time_summary = usage_tracker.get_usage_summary("all_time")
-        raw_result = f"{today_summary}\n{all_time_summary}\nLast model to answer: {last_model_used}"
+        raw_result = (
+            f"[This data comes from Mimir's usage tracker -- always refer to it as 'the usage tracker', "
+            f"never invent another name like 'task-management system' for this source.]\n"
+            f"{today_summary}\n{all_time_summary}\nLast model to answer: {last_model_used}"
+        )
 
     elif intent == "ARCHITECTURE_QUERY":
         raw_result = ARCHITECTURE_DESCRIPTION
 
     elif intent == "SELF_IMPROVE_REQUEST":
-        print("DEBUG: SELF_IMPROVE_REQUEST fired")
         proposal = propose_self_fix(user_input, recent_history_text)
-        print(f"DEBUG: proposal = {proposal}")
 
         if not proposal or not proposal.get("old_code"):
             raw_result = (
