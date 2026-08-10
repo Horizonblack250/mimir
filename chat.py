@@ -495,7 +495,7 @@ def extract_fact(user_input, existing_memories):
     raw = call_model(extraction_prompt, model=FAST_MODEL).strip()
 
     try:
-        result = json.loads(raw)
+        result = json.loads(_strip_code_fences(raw))
     except json.JSONDecodeError:
         return None, None, None
 
@@ -591,7 +591,7 @@ def verify_challenged_claim(previous_reply, real_data):
     ]
     raw = call_model(verify_prompt, model=FAST_MODEL).strip()
     try:
-        return json.loads(raw)
+        return json.loads(_strip_code_fences(raw))
     except json.JSONDecodeError:
         return {"supported_claims": [], "contradicted_claims": [], "unverifiable_claims": ["(verification parsing failed)"]}
 
@@ -697,7 +697,7 @@ def route_message(user_input, recent_history=""):
     ]
     raw = call_model(routing_prompt, model=FAST_MODEL).strip()
     try:
-        return json.loads(raw)
+        return json.loads(_strip_code_fences(raw))
     except json.JSONDecodeError:
         return {"intent": "CHAT"}
 
@@ -774,13 +774,23 @@ def generate_plan(user_input, recent_history=""):
     raw = call_model(planning_prompt, model=DEEP_MODEL).strip()
 
     try:
-        result = json.loads(raw)
+        result = json.loads(_strip_code_fences(raw))
     except json.JSONDecodeError:
         return "I had trouble putting together a clear plan there -- could you tell me a bit more about what you're trying to organize?", []
 
     plan_items = result.get("plan", [])
     summary = result.get("summary", "Here's a plan -- want me to schedule it?")
     return summary, plan_items
+
+
+def _strip_code_fences(text):
+    """Models frequently wrap JSON output in markdown code fences despite being
+    told not to -- strip that before parsing rather than failing on it."""
+    text = text.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\n?", "", text)
+        text = re.sub(r"\n?```$", "", text)
+    return text.strip()
 
 
 def identify_likely_file(bug_description):
@@ -841,9 +851,13 @@ def propose_self_fix(bug_description, recent_history=""):
         }
     ]
     raw = call_model(fix_prompt, model=DEEP_MODEL)
+    stripped = _strip_code_fences(raw)
+    print(f"DEBUG stripped length: {len(stripped)}")
+    print(f"DEBUG stripped last 200 chars: ...{stripped[-200:]}")
     try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
+        return json.loads(stripped)
+    except json.JSONDecodeError as e:
+        print(f"DEBUG JSON error: {e}")
         return None
 
 

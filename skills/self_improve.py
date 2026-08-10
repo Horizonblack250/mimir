@@ -9,6 +9,9 @@ OWN_SOURCE_FILES = [
     "skills/conversation_log.py",
     "skills/gmail_reader.py",
     "skills/usage_tracker.py",
+    "skills/self_improve.py",
+    "check_reminders.py",
+    "test_gmail.py",
 ]
 
 # Even a tiny change touching any of these ALWAYS requires human confirmation,
