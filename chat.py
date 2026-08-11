@@ -795,6 +795,28 @@ def _strip_code_fences(text):
     return text.strip()
 
 
+def _find_file_by_function_mention(bug_description):
+    """Deterministic pre-check: if the bug report literally names a function
+    that exists in exactly one source file, use that directly instead of
+    asking the LLM to guess from filenames alone -- filenames carry no
+    information about what's actually inside them, which is why the guess
+    has been inconsistent."""
+    normalized_bug = bug_description.lower()
+    candidates = set()
+    for fname in self_improve.OWN_SOURCE_FILES:
+        content = self_improve.read_own_source(fname)
+        if not content:
+            continue
+        func_names = re.findall(r"def\s+(\w+)", content)
+        for func_name in func_names:
+            if len(func_name) > 3 and func_name.lower() in normalized_bug:
+                candidates.add(fname)
+                break
+    if len(candidates) == 1:
+        return next(iter(candidates))
+    return None
+
+
 def identify_likely_file(bug_description):
     """Cheap FAST-tier lookup: which single file is most likely responsible?
     Avoids ever needing to send every source file in one prompt, which risks
@@ -824,8 +846,12 @@ def propose_self_fix(bug_description, recent_history=""):
     the user about first. Two-stage: identify the likely file cheaply first,
     then send only that file's content for the actual fix -- not the whole
     codebase at once."""
-    likely_file = identify_likely_file(bug_description)
+    deterministic_match = _find_file_by_function_mention(bug_description)
+    print(f"DEBUG deterministic match: {deterministic_match}")
+    likely_file = deterministic_match or identify_likely_file(bug_description)
+    print(f"DEBUG final likely_file: {likely_file}")
     source_content = self_improve.read_own_source(likely_file)
+    print(f"DEBUG source_content is None: {source_content is None}")
     if source_content is None:
         return None
 
@@ -853,13 +879,9 @@ def propose_self_fix(bug_description, recent_history=""):
         }
     ]
     raw = call_model(fix_prompt, model=DEEP_MODEL)
-    stripped = _strip_code_fences(raw)
-    print(f"DEBUG stripped length: {len(stripped)}")
-    print(f"DEBUG stripped last 200 chars: ...{stripped[-200:]}")
     try:
-        return json.loads(stripped)
-    except json.JSONDecodeError as e:
-        print(f"DEBUG JSON error: {e}")
+        return json.loads(_strip_code_fences(raw))
+    except json.JSONDecodeError:
         return None
 
 

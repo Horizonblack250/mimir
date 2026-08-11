@@ -197,7 +197,7 @@ def complete_all():
     save_tasks(tasks)
     if count == 0:
         return "All tasks were already marked done. Nothing changed."
-    return f"Marked {count} task(s) as done. All tasks are now complete."
+    return f"Marked {count} task(s) as done. All tasks are now marked complete."
 
 
 def delete_all_pending():
