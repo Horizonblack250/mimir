@@ -33,6 +33,8 @@ PROVIDER_CHAINS = {
          "api_key_env": "GEMINI_API_KEY", "model": "gemini-3.5-flash-lite"},
         {"name": "gemini-3.1-flash-lite", "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
          "api_key_env": "GEMINI_API_KEY", "model": "gemini-3.1-flash-lite"},
+        {"name": "nvidia-nemotron", "base_url": "https://integrate.api.nvidia.com/v1",
+         "api_key_env": "NVIDIA_API_KEY", "model": "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning"},
     ],
     "fast": [
         {"name": "groq-8b", "base_url": "https://api.groq.com/openai/v1",
