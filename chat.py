@@ -14,6 +14,7 @@ from skills import conversation_log
 from skills import gmail_reader
 from skills import usage_tracker
 from skills import self_improve
+from skills import file_manager
 
 load_dotenv()
 
@@ -633,6 +634,8 @@ def route_message(user_input, recent_history=""):
                 '{"intent": "USAGE_QUERY"}\n'
                 '{"intent": "ARCHITECTURE_QUERY"}\n'
                 '{"intent": "SELF_IMPROVE_REQUEST"}\n'
+                '{"intent": "FILE_OPERATION", "action": "list/read/copy/move/delete/list_trash/empty_trash", "source": "path or null", "destination": "path or null"}\n'
+                '{"intent": "CONFIRM_FILE_ACTION"}\n'
                 '{"intent": "CONFIRM_PLAN"}\n'
                 '{"intent": "CHAT"}\n\n'
                 "Use ADD_TASK when the user wants to add a brand NEW task/todo/reminder, unrelated to "
@@ -691,6 +694,13 @@ def route_message(user_input, recent_history=""):
                 "architecture is, what models/skills it has, or similar self-description questions.\n"
                 "Use SELF_IMPROVE_REQUEST when the user reports a bug in Mimir itself, describes something "
                 "broken about how Mimir behaves, or explicitly asks Mimir to fix its own code.\n"
+                "Use FILE_OPERATION when the user wants to list a folder, read a file, copy/move a file, "
+                "delete something, view Mimir's trash, or permanently empty the trash. Extract the exact "
+                "file/folder path(s) mentioned. Use action 'delete' for any delete/remove request -- this "
+                "is always safe/reversible (moves to trash), never destructive. Only use 'empty_trash' "
+                "when the user explicitly says to permanently empty/clear the trash.\n"
+                "Use CONFIRM_FILE_ACTION when the user is confirming a permanent action Mimir JUST asked "
+                "about (e.g. confirming emptying the trash).\n"
                 "Use CHAT for everything else, including casual conversation, questions about known facts, "
                 "and questions about the current time or date."
             )
@@ -715,6 +725,10 @@ NO_OP_PREFIXES = (
     "That's already how it's set",
     "I don't have a plan waiting to be confirmed",
     "I don't have a pending fix waiting to be confirmed",
+    "I don't have a pending file action waiting to be confirmed",
+    "doesn't exist -- nothing to",
+    "is not a valid directory",
+    "is not a valid file",
     "I looked through my own code but couldn't identify",
 )
 
@@ -847,11 +861,8 @@ def propose_self_fix(bug_description, recent_history=""):
     then send only that file's content for the actual fix -- not the whole
     codebase at once."""
     deterministic_match = _find_file_by_function_mention(bug_description)
-    print(f"DEBUG deterministic match: {deterministic_match}")
     likely_file = deterministic_match or identify_likely_file(bug_description)
-    print(f"DEBUG final likely_file: {likely_file}")
     source_content = self_improve.read_own_source(likely_file)
-    print(f"DEBUG source_content is None: {source_content is None}")
     if source_content is None:
         return None
 
@@ -1012,6 +1023,8 @@ last_email_context = None  # holds the most recent REAL email check result, so
                             # can ground on real data instead of inventing content
 pending_self_fix = None  # Phase B: a proposed but not-yet-confirmed code fix,
                           # for changes too big/sensitive to auto-apply
+pending_file_action = None  # Phase C: the one genuinely irreversible file
+                             # action (emptying trash) waiting for confirmation
 
 conversation = [
     {"role": "system", "content": build_system_prompt("hello", memories, include_tasks=False)}
@@ -1033,7 +1046,9 @@ while True:
         f"{m['role']}: {m['content']}" for m in recent_turns if m["role"] in ("user", "assistant")
     )
 
-    if pending_self_fix and looks_like_confirmation(user_input):
+    if pending_file_action and looks_like_confirmation(user_input):
+        route = {"intent": "CONFIRM_FILE_ACTION"}
+    elif pending_self_fix and looks_like_confirmation(user_input):
         route = {"intent": "CONFIRM_SELF_FIX"}
     elif pending_plan_items and looks_like_confirmation(user_input):
         route = {"intent": "CONFIRM_PLAN"}
@@ -1201,6 +1216,42 @@ while True:
             else:
                 raw_result = f"Couldn't apply that fix: {msg}"
             pending_self_fix = None
+
+    elif intent == "FILE_OPERATION":
+        action = route.get("action")
+        source = route.get("source")
+        destination = route.get("destination")
+
+        if action == "list":
+            raw_result = file_manager.list_directory(source)
+        elif action == "read":
+            raw_result = file_manager.read_file_preview(source)
+        elif action == "copy":
+            raw_result = file_manager.copy_item(source, destination)
+        elif action == "move":
+            raw_result = file_manager.move_item(source, destination)
+        elif action == "delete":
+            raw_result = file_manager.soft_delete(source)
+        elif action == "list_trash":
+            raw_result = file_manager.list_trash()
+        elif action == "empty_trash":
+            pending_file_action = {"action": "empty_trash"}
+            raw_result = (
+                "CONFIRMATION NEEDED: emptying Mimir Trash is PERMANENT and cannot be undone -- ask the "
+                "user to clearly confirm before this happens, do not proceed without a clear yes."
+            )
+        else:
+            raw_result = "I'm not sure what file operation you meant -- could you clarify?"
+
+    elif intent == "CONFIRM_FILE_ACTION":
+        if not pending_file_action:
+            raw_result = "I don't have a pending file action waiting to be confirmed."
+        elif pending_file_action.get("action") == "empty_trash":
+            raw_result = file_manager.empty_trash()
+            pending_file_action = None
+        else:
+            raw_result = "I don't have a pending file action waiting to be confirmed."
+            pending_file_action = None
 
     if raw_result is not None:
         # Only re-inject the full "ground truth" task list for intents that
