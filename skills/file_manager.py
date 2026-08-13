@@ -1,8 +1,28 @@
 import os
 import shutil
 import datetime
+import re
 
 TRASH_DIR = os.path.join(os.path.expanduser("~"), "MimirTrash")
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _normalize_path(path):
+    """Fixes common path-formatting slips before ever checking a file's
+    existence -- a missing drive colon ('D/Dev/mimir' instead of 'D:\\Dev\\mimir')
+    makes an otherwise-real file look nonexistent to Python, which is
+    confusing and wrong. Also resolves bare filenames (no path at all)
+    relative to Mimir's own project folder, since that's the natural default."""
+    if not path:
+        return path
+    path = path.strip()
+    # Fix a missing drive colon: "D/Dev/mimir" -> "D:/Dev/mimir"
+    if re.match(r"^[A-Za-z][\\/]", path):
+        path = path[0] + ":" + path[1:]
+    # Bare filename, no directory at all -- assume Mimir's own project folder
+    if not os.path.dirname(path):
+        path = os.path.join(PROJECT_ROOT, path)
+    return os.path.normpath(path)
 
 
 def _ensure_trash():
@@ -10,6 +30,7 @@ def _ensure_trash():
 
 
 def list_directory(path):
+    path = _normalize_path(path)
     if not path or not os.path.isdir(path):
         return f"'{path}' is not a valid directory."
     try:
@@ -27,6 +48,7 @@ def list_directory(path):
 
 
 def read_file_preview(path, max_chars=3000):
+    path = _normalize_path(path)
     if not path or not os.path.isfile(path):
         return f"'{path}' is not a valid file."
     try:
@@ -55,6 +77,8 @@ def _unique_destination(dst):
 
 
 def copy_item(src, dst):
+    src = _normalize_path(src)
+    dst = _normalize_path(dst)
     if not src or not os.path.exists(src):
         return f"'{src}' doesn't exist -- nothing to copy."
     if not dst:
@@ -73,6 +97,8 @@ def copy_item(src, dst):
 
 
 def move_item(src, dst):
+    src = _normalize_path(src)
+    dst = _normalize_path(dst)
     if not src or not os.path.exists(src):
         return f"'{src}' doesn't exist -- nothing to move."
     if not dst:
@@ -91,6 +117,7 @@ def soft_delete(path):
     """Never permanently deletes -- moves to a Mimir Trash folder instead.
     Fully reversible; this is the only kind of 'delete' that happens without
     confirmation, precisely because it can't actually destroy anything."""
+    path = _normalize_path(path)
     if not path or not os.path.exists(path):
         return f"'{path}' doesn't exist -- nothing to delete."
     _ensure_trash()
