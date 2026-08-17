@@ -9,3 +9,4 @@ conversation_log.jsonl
 credentials.json
 token.json
 usage_stats.json
+firestore-credentials.json
