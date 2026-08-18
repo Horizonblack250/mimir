@@ -15,6 +15,7 @@ from skills import gmail_reader
 from skills import usage_tracker
 from skills import self_improve
 from skills import file_manager
+from skills import firestore_sync
 
 load_dotenv()
 
@@ -1103,6 +1104,8 @@ while True:
             if task_type not in ("task", "event", "reminder", "deadline", "habit"):
                 task_type = "task"
             raw_result, new_id = todo.add_task(task_desc, due_iso, task_type, route.get("reminder_offset_minutes"))
+            if new_id and due_iso:
+                firestore_sync.sync_task(new_id, task_desc, due_iso, route.get("reminder_offset_minutes"))
             push_focus(conversation_focus_stack, new_id)
 
     elif intent == "UPDATE_TASK":
