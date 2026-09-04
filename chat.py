@@ -27,10 +27,14 @@ FAST_MODEL = "fast"
 last_model_used = "none yet"
 DEEP_MODEL = "deep"
 
+# UPDATED 2026-09-04: Groq deprecated llama-3.1-8b-instant and
+# llama-3.3-70b-versatile on 08/16/26. Migrated to Groq's official
+# recommended replacements (openai/gpt-oss-20b and openai/gpt-oss-120b).
+# Gemini and NVIDIA entries are unchanged -- already current, not deprecated.
 PROVIDER_CHAINS = {
     "deep": [
-        {"name": "groq-70b", "base_url": "https://api.groq.com/openai/v1",
-         "api_key_env": "GROQ_API_KEY", "model": "llama-3.3-70b-versatile"},
+        {"name": "groq-gpt-oss-120b", "base_url": "https://api.groq.com/openai/v1",
+         "api_key_env": "GROQ_API_KEY", "model": "openai/gpt-oss-120b"},
         {"name": "gemini-3.5-flash-lite", "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
          "api_key_env": "GEMINI_API_KEY", "model": "gemini-3.5-flash-lite"},
         {"name": "gemini-3.1-flash-lite", "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
@@ -39,8 +43,8 @@ PROVIDER_CHAINS = {
          "api_key_env": "NVIDIA_API_KEY", "model": "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning"},
     ],
     "fast": [
-        {"name": "groq-8b", "base_url": "https://api.groq.com/openai/v1",
-         "api_key_env": "GROQ_API_KEY", "model": "llama-3.1-8b-instant"},
+        {"name": "groq-gpt-oss-20b", "base_url": "https://api.groq.com/openai/v1",
+         "api_key_env": "GROQ_API_KEY", "model": "openai/gpt-oss-20b"},
         {"name": "gemini-3.1-flash-lite", "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
          "api_key_env": "GEMINI_API_KEY", "model": "gemini-3.1-flash-lite"},
     ],
@@ -54,9 +58,9 @@ RELEVANT_MEMORY_MIN_SIM = 0.45
 
 ARCHITECTURE_DESCRIPTION = (
     "Mimir runs as a Python script (chat.py), built on a two-tier model strategy with automatic "
-    "provider fallback chains. There are two roles: a FAST tier (currently Groq's llama-3.1-8b-instant, "
+    "provider fallback chains. There are two roles: a FAST tier (currently Groq's openai/gpt-oss-20b, "
     "falling back to Gemini if needed) which handles invisible background work -- classifying intent, "
-    "extracting facts, filtering emails -- and a DEEP tier (currently Groq's llama-3.3-70b-versatile, "
+    "extracting facts, filtering emails -- and a DEEP tier (currently Groq's openai/gpt-oss-120b, "
     "with Gemini fallbacks) which generates every reply the user actually reads, so voice stays consistent "
     "regardless of which skill triggered it.\n\n"
     "Core systems: a task engine with stable IDs, a Conversation Focus Stack (remembers recently-discussed "
