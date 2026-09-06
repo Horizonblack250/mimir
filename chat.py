@@ -407,7 +407,20 @@ def extract_due_datetime(text):
     dateparser's search function -- deterministic and reliable, unlike asking
     the LLM to correctly identify and isolate the phrase, which has repeatedly
     failed. This is the primary method; route.get('due_text') is now just a
-    secondary hint, not the source of truth."""
+    secondary hint, not the source of truth.
+
+    IMPORTANT: a message can ALSO contain a separate reminder-offset phrase
+    (e.g. "...in 8 minutes, remind me 5 minutes before"). That offset phrase
+    is itself a time expression and, if left in, can get picked up by
+    search_dates() as if IT were the due date -- especially since it often
+    appears LAST in the sentence and this function takes the last match.
+    Strip it out before searching, so only the actual due-date phrase remains."""
+    text = re.sub(
+        r"\d+\s*(?:minutes?|mins?|hours?|hrs?|days?)\s*(?:before|prior|in advance|ahead)\b",
+        "",
+        text,
+        flags=re.IGNORECASE
+    )
     text = _correct_weekday_typos(text)
     text = _resolve_next_weekday(text)
     try:
